@@ -16,6 +16,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "huggingface-hub>=1.32.0",
     "pytest>=8",
     "ruff>=0.6",
 ]

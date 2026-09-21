@@ -29,7 +29,9 @@ MODULES = [
     "tagurit.sim.config",
     "tagurit.sim.connectivity",
     "tagurit.sim.image_feeder",
-    "tagurit.sim.run_client"
+    "tagurit.sim.run_client",
+    "tagurit.sim.trace",
+    "tagurit.sim.dataloader",
 ]
 
 
