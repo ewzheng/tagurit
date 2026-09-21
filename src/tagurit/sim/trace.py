@@ -7,8 +7,11 @@ image data. A frame knows where its JPEG lives and reads it on demand, so
 building a Trace for a thousand-frame sequence costs a directory listing
 and one text parse, not a gigabyte of memory.
 
-Dataset parsers (see ``dataloader``) produce these types. Everything
-downstream in ``sim`` consumes them.
+Dataset parsers (``visdrone``, ``seadronessee``) produce these types
+and ``dataloader`` hands them out. Everything downstream in ``sim``
+consumes them without knowing which dataset they came from: frame
+spacing comes from ``timestamp``, never from an assumed rate, and labels
+are the dataset's own strings.
 """
 
 from __future__ import annotations
@@ -31,7 +34,8 @@ class Box:
 
     ``label`` is a dataset class name such as "pedestrian". Parsers keep
     every class the dataset defines, including don't-care regions, and
-    leave filtering to the consumer.
+    leave filtering to the consumer. The last three fields are None when
+    the dataset does not annotate them.
 
     Parameters:
         - label (str): dataset class name
@@ -39,9 +43,9 @@ class Box:
         - top (int): y of the top edge, pixels
         - width (int): box width, pixels
         - height (int): box height, pixels
-        - track_id (int): identity of the object across frames
-        - truncation (int): 0 fully inside the frame, 1 partly outside
-        - occlusion (int): 0 none, 1 partial, 2 heavy
+        - track_id (int | None): identity of the object across frames
+        - truncation (int | None): 0 fully inside the frame, 1 partly outside
+        - occlusion (int | None): 0 none, 1 partial, 2 heavy
     """
 
     label: str
@@ -49,9 +53,9 @@ class Box:
     top: int
     width: int
     height: int
-    track_id: int
-    truncation: int
-    occlusion: int
+    track_id: int | None
+    truncation: int | None
+    occlusion: int | None
 
 
 @dataclass(frozen=True)
@@ -65,7 +69,9 @@ class TraceFrame:
 
     Parameters:
         - sequence (str): name of the sequence this frame belongs to
-        - index (int): one-based frame number, as on disk
+        - index (int): frame number as the dataset counts it; VisDrone is
+          one-based and dense, SeaDronesSee is the source video's frame
+          number and steps by 15
         - timestamp (float): seconds since the first frame of the sequence
         - path (Path): the JPEG file
         - boxes (tuple[Box, ...]): ground truth on this frame, possibly empty

@@ -1,9 +1,9 @@
 """
-Play a VisDrone-MOT sequence with its ground-truth boxes drawn, or write it
-to an mp4.
+Play a dataset's sequences with their ground-truth boxes drawn, or write one
+sequence to an mp4.
 
 Usage:
-    uv run python scripts/view_trace.py [--split val] [--fps 30] [--width 1280]  # all, looping
+    uv run python scripts/view_trace.py [--dataset visdrone] [--fps 30] [--width 1280]
     uv run python scripts/view_trace.py --list                     # list sequences and exit
     uv run python scripts/view_trace.py --sequence NAME            # loop one sequence
     uv run python scripts/view_trace.py --sequence NAME --out clip.mp4
@@ -14,8 +14,9 @@ Esc quits. After the last frame of the last sequence, playback continues
 from the first.
 
 Frames and boxes come from ``tagurit.sim.dataloader``, so what you see is
-exactly what the loader parsed. Boxes are COCO-style xywh in absolute
-pixels; see ``tagurit.sim.trace.Box``.
+exactly what the loader parsed, for whichever dataset ``--dataset`` names.
+With no ``--sequence`` every sequence of the dataset plays in a loop. Boxes
+are COCO-style xywh in absolute pixels; see ``tagurit.sim.trace.Box``.
 
 The window shows frames 1:1 at ``--width`` pixels wide, shrunk by us with
 area interpolation before the boxes are drawn. Letting Qt shrink a
@@ -67,7 +68,9 @@ WINDOW = "tagurit trace"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
-def render(frame: TraceFrame, total: int, max_width: int | None = None) -> np.ndarray:
+def render(
+    frame: TraceFrame, position: int, total: int, max_width: int | None = None
+) -> np.ndarray:
     """
     Decode one frame and draw its boxes and a status overlay onto it.
 
@@ -80,7 +83,8 @@ def render(frame: TraceFrame, total: int, max_width: int | None = None) -> np.nd
 
     Parameters:
         - frame (TraceFrame): the frame to draw
-        - total (int): number of frames in the sequence, for the overlay
+        - position (int): one-based place of this frame in the trace, for the overlay
+        - total (int): number of frames in the trace, for the overlay
         - max_width (int | None): shrink to this width if wider; None keeps native size
 
     Return: BGR image array ready for imshow or VideoWriter
@@ -99,10 +103,10 @@ def render(frame: TraceFrame, total: int, max_width: int | None = None) -> np.nd
         right, bottom = round((box.left + box.width) * scale), round((box.top + box.height) * scale)
         cv2.rectangle(image, (left, top), (right, bottom), color, 1)
         label_at = (left, max(top - 3, 10))
-        text = f"{box.label} {box.track_id}"
+        text = box.label if box.track_id is None else f"{box.label} {box.track_id}"
         cv2.putText(image, text, label_at, FONT, 0.4, color, 1, cv2.LINE_AA)
     status = (
-        f"{frame.sequence}  {frame.index}/{total}  "
+        f"{frame.sequence}  {position}/{total}  frame {frame.index}  "
         f"t={frame.timestamp:.2f}s  boxes={len(frame.boxes)}"
     )
     # One text pass over a filled bar. Two passes at different thicknesses drift
@@ -128,13 +132,13 @@ def write(trace: Trace, out: Path, fps: float) -> None:
     Return: void
     """
     total = len(trace)
-    first = render(trace.frames[0], total)
+    first = render(trace.frames[0], 1, total)
     height, width = first.shape[:2]
     writer = cv2.VideoWriter(str(out), cv2.VideoWriter_fourcc(*"mp4v"), fps, (width, height))
     if not writer.isOpened():
         sys.exit(f"could not open {out} for writing")
-    for frame in trace:
-        image = render(frame, total)
+    for position, frame in enumerate(trace, start=1):
+        image = render(frame, position, total)
         if image.shape[:2] != (height, width):
             image = cv2.resize(image, (width, height))
         writer.write(image)
@@ -157,7 +161,7 @@ def window_closed() -> bool:
         return True
 
 
-def show(root: Path, names: list[str], fps: float, width: int) -> None:
+def show(dataset: str, names: list[str], fps: float, width: int) -> None:
     """
     Play the sequences in ``names`` in a window, in order, looping forever.
 
@@ -170,7 +174,7 @@ def show(root: Path, names: list[str], fps: float, width: int) -> None:
     closing.
 
     Parameters:
-        - root (Path): a split folder, see ``dataloader.default_root``
+        - dataset (str): a key of ``dataloader.DATASETS``
         - names (list[str]): the playlist, at least one sequence name
         - fps (float): playback rate; the wait between frames is 1000/fps ms
         - width (int): display width in pixels; wider frames are shrunk to it
@@ -183,7 +187,7 @@ def show(root: Path, names: list[str], fps: float, width: int) -> None:
     def trace_at(position: int) -> Trace:
         name = names[position % len(names)]
         if name not in loaded:
-            loaded[name] = dataloader.load(root, name, fps=fps)
+            loaded[name] = dataloader.load(dataset, name, fps=fps)
         return loaded[name]
 
     position = 0
@@ -192,7 +196,7 @@ def show(root: Path, names: list[str], fps: float, width: int) -> None:
     trace = trace_at(position)
     cv2.namedWindow(WINDOW, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
     while True:
-        cv2.imshow(WINDOW, render(trace.frames[index], len(trace), max_width=width))
+        cv2.imshow(WINDOW, render(trace.frames[index], index + 1, len(trace), max_width=width))
         key = cv2.waitKey(0 if paused else delay_ms) & 0xFF
         if key in (ord("q"), 27) or window_closed():
             break
@@ -230,7 +234,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--split", default="val", help="val, train, or test-dev (default: val)")
+    parser.add_argument(
+        "--dataset",
+        choices=sorted(dataloader.DATASETS),
+        default="visdrone",
+        help="which dataset under data/ to play (default: visdrone)",
+    )
     parser.add_argument("--list", action="store_true", help="list the split's sequences and exit")
     parser.add_argument("--sequence", help="play only this sequence (default: all, looping)")
     parser.add_argument("--fps", type=float, default=30.0, help="playback rate (default: 30)")
@@ -242,12 +251,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    root = dataloader.default_root(args.split)
+    dataset = args.dataset
     try:
-        names = dataloader.sequences(root)
+        names = dataloader.sequences(dataset)
         if args.list:
             for name in names:
-                print(f"{name}  {len(dataloader.load(root, name))} frames")
+                print(f"{name}  {len(dataloader.load(dataset, name))} frames")
             return
         if args.sequence is not None:
             if args.sequence not in names:
@@ -256,15 +265,13 @@ def main(argv: list[str] | None = None) -> None:
                 )
             names = [args.sequence]
         if args.out is None:
-            show(root, names, args.fps, args.width)
+            show(dataset, names, args.fps, args.width)
             return
         if len(names) != 1:
             sys.exit("--out needs --sequence to pick which one to write")
-        write(dataloader.load(root, names[0], fps=args.fps), args.out, args.fps)
+        write(dataloader.load(dataset, names[0], fps=args.fps), args.out, args.fps)
     except FileNotFoundError as exc:
-        hint = (
-            f"fetch the split first: uv run python scripts/fetch_visdrone.py --split {args.split}"
-        )
+        hint = f"fetch it first: uv run python scripts/fetch_data.py {dataset}"
         sys.exit(f"{exc}\n{hint}")
 
 

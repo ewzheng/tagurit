@@ -32,6 +32,8 @@ MODULES = [
     "tagurit.sim.run_client",
     "tagurit.sim.trace",
     "tagurit.sim.dataloader",
+    "tagurit.sim.visdrone",
+    "tagurit.sim.seadronessee",
 ]
 
 

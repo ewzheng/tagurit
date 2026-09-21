@@ -14,4 +14,5 @@ fmt:
 	uv run ruff format .
 
 data:
-	uv run python scripts/fetch_visdrone.py --split val
+	uv run python scripts/fetch_data.py visdrone
+	uv run python scripts/fetch_data.py seadronessee
