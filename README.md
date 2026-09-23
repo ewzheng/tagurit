@@ -12,11 +12,18 @@ backlog drains alongside the live stream.
 uv sync
 make test
 ```
-
 ## Layout
 
-- `src/tagurit/` — Python package, one module per pipeline stage. See `.llm/architecture.md`.
+- `src/tagurit/`
+  - `protocol.py` — shared image handoff datatype
+  - `client/` — queues, scheduling and Gabriel transmission
+  - `cloudlet/` — image receiver and duplicate tracking
+  - `shared/` — wire messages, encoding and receipts
+  - `model/` and `tagging/` — perception and priority scoring
+  - `sim/` — sample image input and simulation helpers
+  - `orchestrator.py` — reserved for top-level integration
+- `data/` — local demo images and manifest, gitignored
 - `tests/` — pytest
 - `docs/` — design specs and implementation plans
 - `scripts/` — dev helpers
-- `.llm/` — shared context for coding agents (Codex, Claude Code)
+- `.llm/` — shared context for coding agents

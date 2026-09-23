@@ -5,7 +5,14 @@ description = "Tag and cache what matters on a disconnected edge device, then sy
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "gabriel-client==5.2.0",
+    "gabriel-protocol==5.1",
+    "gabriel-server==5.2.0",
+    "numpy>=2.5.3",
+    "opencv-python>=5.0.0.93",
+    "websockets>=17.1",
+]
 
 [dependency-groups]
 dev = [
