@@ -9,7 +9,8 @@ from tagurit.sim import Box, Trace, TraceFrame
 
 def make_box(**overrides: object) -> Box:
     fields: dict[str, object] = {
-        "label": "pedestrian",
+        "label": "person",
+        "dataset_label": "pedestrian",
         "left": 10,
         "top": 20,
         "width": 30,

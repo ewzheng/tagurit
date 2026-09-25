@@ -11,7 +11,8 @@ Dataset parsers (``visdrone``, ``seadronessee``) produce these types
 and ``dataloader`` hands them out. Everything downstream in ``sim``
 consumes them without knowing which dataset they came from: frame
 spacing comes from ``timestamp``, never from an assumed rate, and labels
-are the dataset's own strings.
+are COCO class names wherever the dataset's class has one, so ground truth
+compares directly against a COCO-trained detector.
 """
 
 from __future__ import annotations
@@ -32,13 +33,18 @@ class Box:
     center point (YOLO), NOT two corners (Pascal VOC). The right edge is
     ``left + width`` and the bottom edge is ``top + height``.
 
-    ``label`` is a dataset class name such as "pedestrian". Parsers keep
-    every class the dataset defines, including don't-care regions, and
-    leave filtering to the consumer. The last three fields are None when
-    the dataset does not annotate them.
+    ``label`` is the COCO class name when the dataset's class has a COCO
+    equivalent, so VisDrone's "pedestrian" and SeaDronesSee's "swimmer" both
+    arrive as "person". A class with no equivalent, such as "buoy" or the
+    don't-care "ignored", keeps its dataset name. ``dataset_label`` is ALWAYS
+    the dataset's own name, unchanged. Parsers keep every class the dataset
+    defines, including don't-care regions, and leave filtering to the
+    consumer. The last three fields are None when the dataset does not
+    annotate them.
 
     Parameters:
-        - label (str): dataset class name
+        - label (str): COCO class name, or the dataset's name when COCO has none
+        - dataset_label (str): the dataset's own class name
         - left (int): x of the left edge, pixels
         - top (int): y of the top edge, pixels
         - width (int): box width, pixels
@@ -49,6 +55,7 @@ class Box:
     """
 
     label: str
+    dataset_label: str
     left: int
     top: int
     width: int

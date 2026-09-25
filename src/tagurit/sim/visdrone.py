@@ -21,6 +21,11 @@ unchanged. Frames with no objects have no lines, so the frame list ALWAYS
 comes from the directory, never from the annotation file. Score is 1 in
 ground truth and is dropped. Every category is kept, including 0 (ignored
 regions). Consumers filter.
+
+Labels are COCO class names where one exists (``LABELS``): pedestrian and
+people become person, van becomes car, and motor becomes motorcycle.
+Tricycle, awning-tricycle, others, and ignored have no COCO equivalent and
+keep their names. The VisDrone name is kept in ``Box.dataset_label``.
 """
 
 from __future__ import annotations
@@ -43,6 +48,21 @@ CATEGORIES: dict[int, str] = {
     9: "bus",
     10: "motor",
     11: "others",
+}
+
+LABELS: dict[str, str] = {
+    "ignored": "ignored",
+    "pedestrian": "person",
+    "people": "person",
+    "bicycle": "bicycle",
+    "car": "car",
+    "van": "car",
+    "truck": "truck",
+    "tricycle": "tricycle",
+    "awning-tricycle": "awning-tricycle",
+    "bus": "bus",
+    "motor": "motorcycle",
+    "others": "others",
 }
 
 PREFIX = "VisDrone2019-MOT-"
@@ -152,9 +172,11 @@ def _parse_annotations(ann_file: Path) -> dict[int, list[Box]]:
             frame, track_id, left, top, width, height, _score, category, trunc, occ = values
             if category not in CATEGORIES:
                 raise ValueError(f"{ann_file}:{lineno}: unknown category {category}")
+            name = CATEGORIES[category]
             by_frame[frame].append(
                 Box(
-                    label=CATEGORIES[category],
+                    label=LABELS[name],
+                    dataset_label=name,
                     left=left,
                     top=top,
                     width=width,

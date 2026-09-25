@@ -40,4 +40,4 @@ def test_sequences_and_load_delegate(visdrone_root: Path) -> None:
     trace = dataloader.load("visdrone", f"val/{SEQ}", root=visdrone_root, fps=10.0)
     assert len(trace) == 1
     assert trace.fps == 10.0
-    assert trace.frames[0].boxes[0].label == "pedestrian"
+    assert trace.frames[0].boxes[0].label == "person"

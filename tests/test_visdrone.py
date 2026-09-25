@@ -36,12 +36,29 @@ def _rewrite_annotations(root: Path, text: str) -> Path:
     return ann
 
 
-def test_categories_cover_all_twelve_ids() -> None:
-    assert sorted(visdrone.CATEGORIES) == list(range(12))
-    assert visdrone.CATEGORIES[0] == "ignored"
-    assert visdrone.CATEGORIES[1] == "pedestrian"
-    assert visdrone.CATEGORIES[4] == "car"
-    assert visdrone.CATEGORIES[11] == "others"
+@pytest.mark.parametrize(
+    ("category", "dataset_label", "label"),
+    [
+        (0, "ignored", "ignored"),
+        (1, "pedestrian", "person"),
+        (2, "people", "person"),
+        (3, "bicycle", "bicycle"),
+        (4, "car", "car"),
+        (5, "van", "car"),
+        (6, "truck", "truck"),
+        (7, "tricycle", "tricycle"),
+        (8, "awning-tricycle", "awning-tricycle"),
+        (9, "bus", "bus"),
+        (10, "motor", "motorcycle"),
+        (11, "others", "others"),
+    ],
+)
+def test_labels_are_coco_names_where_one_exists(
+    root: Path, category: int, dataset_label: str, label: str
+) -> None:
+    _rewrite_annotations(root, f"1,1,10,20,30,40,1,{category},0,0\n")
+    (box,) = visdrone.load(root, NAME).frames[0].boxes
+    assert (box.dataset_label, box.label) == (dataset_label, label)
 
 
 def test_sequences_are_split_prefixed_and_sorted(root: Path) -> None:
@@ -69,7 +86,7 @@ def test_load_orders_frames_and_derives_timestamps(root: Path) -> None:
 
 def test_load_joins_boxes_by_frame(root: Path) -> None:
     frames = visdrone.load(root, NAME).frames
-    assert [b.label for b in frames[0].boxes] == ["pedestrian", "ignored"]
+    assert [b.label for b in frames[0].boxes] == ["person", "ignored"]
     assert frames[1].boxes == ()
     (box,) = frames[2].boxes
     assert box.label == "car"

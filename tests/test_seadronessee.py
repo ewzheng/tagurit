@@ -11,6 +11,9 @@ CATEGORIES = [
     {"id": 0, "name": "ignored", "supercategory": "ignored"},
     {"id": 1, "name": "swimmer", "supercategory": "person"},
     {"id": 2, "name": "boat", "supercategory": "boat"},
+    {"id": 3, "name": "jetski", "supercategory": "boat"},
+    {"id": 4, "name": "life_saving_appliances", "supercategory": "object"},
+    {"id": 5, "name": "buoy", "supercategory": "object"},
 ]
 
 
@@ -45,6 +48,7 @@ TRAIN = {
         _annotation(2, 11, 0, [50, 60, 70, 80]),
         _annotation(3, 10, 2, [15.4, 25.6, 30, 40]),
         _annotation(4, 40, 1, [1, 1, 1, 1]),
+        *(_annotation(10 + c, 30, c, [c, c, 5, 5]) for c in range(6)),
     ],
 }
 VAL = {
@@ -93,9 +97,9 @@ def test_load_merges_splits_and_orders_by_frame_number(root: Path) -> None:
     assert trace.frames[1].read() == b"frame-20"
 
 
-def test_load_boxes_use_dataset_names_and_no_track_ids(root: Path) -> None:
+def test_load_joins_boxes_and_has_no_track_ids(root: Path) -> None:
     frames = seadronessee.load(root, "DJI_0001").frames
-    assert [b.label for b in frames[0].boxes] == ["swimmer", "ignored"]
+    assert [b.label for b in frames[0].boxes] == ["person", "ignored"]
     assert frames[1].boxes == ()
     (box,) = frames[2].boxes
     assert box.label == "boat"
@@ -103,6 +107,26 @@ def test_load_boxes_use_dataset_names_and_no_track_ids(root: Path) -> None:
     assert box.track_id is None
     assert box.truncation is None
     assert box.occlusion is None
+
+
+def test_labels_are_coco_names_where_one_exists(root: Path) -> None:
+    (frame,) = seadronessee.load(root, "DJI_0002").frames
+    assert [(b.dataset_label, b.label) for b in frame.boxes] == [
+        ("ignored", "ignored"),
+        ("swimmer", "person"),
+        ("boat", "boat"),
+        ("jetski", "boat"),
+        ("life_saving_appliances", "life_saving_appliances"),
+        ("buoy", "buoy"),
+    ]
+
+
+def test_category_without_a_label_raises(root: Path) -> None:
+    floater = {"id": 6, "name": "floater", "supercategory": "person"}
+    ann = root / "unpacked" / "annotations" / "instances_train.json"
+    ann.write_text(json.dumps({**TRAIN, "categories": [*CATEGORIES, floater]}))
+    with pytest.raises(ValueError, match="instances_train.json.*floater"):
+        seadronessee.load(root, "DJI_0001")
 
 
 def test_stills_without_a_source_video_are_skipped(root: Path) -> None:

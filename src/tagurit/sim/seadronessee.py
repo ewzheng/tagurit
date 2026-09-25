@@ -14,10 +14,17 @@ video ordered by frame number, with frames drawn from BOTH splits because
 the official split interleaves frames of the same videos. Images without a
 source video (stills from a fixed-wing camera) are skipped.
 
-Boxes are COCO xywh in absolute pixels, rounded to integers. Labels are the
-dataset's names: swimmer, boat, jetski, life_saving_appliances, buoy, and
-ignored. Track ids, truncation, and occlusion are not annotated and come
-through as None.
+Boxes are COCO xywh in absolute pixels, rounded to integers. Track ids,
+truncation, and occlusion are not annotated and come through as None.
+
+Labels are COCO class names where one exists (``LABELS``): swimmer becomes
+person and jetski becomes boat, following the dataset's own supercategories.
+Life_saving_appliances, buoy, and ignored have no COCO equivalent and keep
+their names. The dataset name is kept in ``Box.dataset_label``.
+
+Some images have regions painted solid black in the JPEG itself, up to a
+whole shoreline. No box falls inside them, and the "ignored" category,
+though defined, has no boxes in either split.
 """
 
 from __future__ import annotations
@@ -32,6 +39,15 @@ from tagurit.sim.trace import Box, Trace, TraceFrame
 
 SPLITS = ("train", "val")
 SOURCE_FPS = 30.0
+
+LABELS: dict[str, str] = {
+    "ignored": "ignored",
+    "swimmer": "person",
+    "boat": "boat",
+    "jetski": "boat",
+    "life_saving_appliances": "life_saving_appliances",
+    "buoy": "buoy",
+}
 
 
 @dataclass(frozen=True)
@@ -71,7 +87,9 @@ def index(root: Path) -> dict[str, list[ImageRecord]]:
     the fetch script, ``sequences``, and ``load`` all need it and the
     training file is tens of megabytes. Images that share a video name but
     come from a different drone or folder RAISE, because the name is the
-    sequence key and would silently merge two videos.
+    sequence key and would silently merge two videos. A category missing
+    from ``LABELS`` RAISES too, since its COCO name is a decision nobody has
+    made yet.
 
     Parameters:
         - root (Path): the dataset folder
@@ -93,12 +111,17 @@ def _index(root: Path) -> dict[str, list[ImageRecord]]:
         found = True
         data = json.loads(ann_file.read_text())
         names = {c["id"]: c["name"] for c in data["categories"]}
+        unlabeled = sorted(set(names.values()) - set(LABELS))
+        if unlabeled:
+            raise ValueError(f"{ann_file}: categories with no entry in LABELS: {unlabeled}")
         boxes: dict[int, list[Box]] = defaultdict(list)
         for ann in data["annotations"]:
             left, top, width, height = (round(v) for v in ann["bbox"])
+            name = names[ann["category_id"]]
             boxes[ann["image_id"]].append(
                 Box(
-                    label=names[ann["category_id"]],
+                    label=LABELS[name],
+                    dataset_label=name,
                     left=left,
                     top=top,
                     width=width,

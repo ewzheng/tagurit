@@ -49,20 +49,24 @@ if sys.platform.startswith("linux") and not os.path.isdir(os.environ.get("QT_QPA
 
 from tagurit.sim import Trace, TraceFrame, dataloader
 
-# BGR, one per VisDrone label. Ignored regions are gray so they read as "don't care".
+# BGR, one per label. Colors repeat only across datasets, never within one, because a
+# frame holds one dataset's labels. Person is magenta so a swimmer stands out on green
+# water. Ignored regions are gray so they read as "don't care"; an unlisted label
+# draws white.
 COLORS: dict[str, tuple[int, int, int]] = {
     "ignored": (128, 128, 128),
-    "pedestrian": (0, 200, 0),
-    "people": (0, 255, 128),
+    "person": (255, 0, 255),
     "bicycle": (255, 128, 0),
     "car": (0, 128, 255),
-    "van": (0, 200, 255),
     "truck": (0, 64, 255),
-    "tricycle": (255, 0, 128),
-    "awning-tricycle": (255, 0, 200),
     "bus": (0, 0, 255),
-    "motor": (255, 255, 0),
+    "motorcycle": (255, 255, 0),
+    "tricycle": (255, 0, 128),
+    "awning-tricycle": (0, 255, 128),
     "others": (200, 200, 200),
+    "boat": (0, 255, 255),
+    "buoy": (0, 0, 255),
+    "life_saving_appliances": (255, 255, 0),
 }
 WINDOW = "tagurit trace"
 FONT = cv2.FONT_HERSHEY_SIMPLEX
