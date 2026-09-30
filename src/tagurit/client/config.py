@@ -6,10 +6,13 @@ Configure client scheduling and Gabriel communication
 LIVE_FRAME_WEIGHT = 2
 STORED_FRAME_WEIGHT = 1
 
+# Move one waiting live frame into the bank after each disconnected interval
+LIVE_TO_BANK_INTERVAL_SECONDS = 5.0
+
 # Set the minimum time between image submissions
 SEND_INTERVAL_SECONDS = 0.75
 
-# Set how often the transport checks for work and timeouts
+# Set how often the client checks for work and timeouts
 LOOP_INTERVAL_SECONDS = 0.02
 
 # Set the Gabriel server and the engine that receives our images

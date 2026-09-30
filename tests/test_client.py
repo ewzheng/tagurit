@@ -1,5 +1,5 @@
 """
-Check priority ordering, arbitration and unresolved frame retention
+Check priority ordering, arbitration, retention and disconnected migration
 """
 
 import pytest
@@ -13,8 +13,9 @@ from tagurit.protocol import ImageFrame
 # Shared test helpers
 # ============================================================
 
+
 # Create a small frame without reading an image file
-def _make_frame(frame_id: int, priority: float | None) -> ImageFrame:
+def _make_frame(frame_id: int, priority: float = 0.50) -> ImageFrame:
     return ImageFrame(
         frame_id=frame_id,
         timestamp=0.0,
@@ -33,6 +34,7 @@ def _pop_id(scheduler: FrameScheduler) -> int:
 # ============================================================
 # Stored priority bank tests
 # ============================================================
+
 
 # Check retention and ordering of banked frames
 def test_priority_bank() -> None:
@@ -110,15 +112,10 @@ def test_priority_bank() -> None:
         assert _pop_id(scheduler) == 3
         assert _pop_id(scheduler) == 1
 
-    # Unscored frames must not enter the bank
+    # Every incoming frame must carry a valid score
     def check_unscored_frame() -> None:
-        scheduler = FrameScheduler()
-        scheduler.set_connected(False)
-
         with pytest.raises(ValueError, match="priority score"):
-            scheduler.add_frame(_make_frame(1, None))
-
-        assert scheduler.pending_count() == 0
+            ImageFrame(frame_id=1, timestamp=0.0, image_bytes=b"test", priority=None)
 
     check_empty_bank()
     check_store_and_remove()
@@ -132,6 +129,7 @@ def test_priority_bank() -> None:
 # State and arbitration tests
 # ============================================================
 
+
 # Check live ordering and sharing between live and stored traffic
 def test_scheduler_modes() -> None:
     """
@@ -144,7 +142,7 @@ def test_scheduler_modes() -> None:
     # Connected mode must serve live frames in arrival order
     def check_connected_order() -> None:
         scheduler = FrameScheduler()
-        scheduler.add_frame(_make_frame(1, None))
+        scheduler.add_frame(_make_frame(1, 0.50))
         scheduler.add_frame(_make_frame(2, 0.90))
 
         assert scheduler.state == SchedulerState.CONNECTED
@@ -165,7 +163,7 @@ def test_scheduler_modes() -> None:
         scheduler.set_connected(True)
 
         for frame_id in [3, 4, 5, 6]:
-            scheduler.add_frame(_make_frame(frame_id, None))
+            scheduler.add_frame(_make_frame(frame_id, 0.50))
 
         for expected_id in [3, 4, 2, 5, 6, 1]:
             assert scheduler.state == SchedulerState.REINTEGRATING
@@ -181,16 +179,16 @@ def test_scheduler_modes() -> None:
         scheduler.add_frame(_make_frame(1, 0.90))
         scheduler.add_frame(_make_frame(2, 0.80))
         scheduler.set_connected(True)
-        scheduler.add_frame(_make_frame(3, None))
-        scheduler.add_frame(_make_frame(4, None))
+        scheduler.add_frame(_make_frame(3, 0.50))
+        scheduler.add_frame(_make_frame(4, 0.50))
 
         assert [_pop_id(scheduler) for _ in range(4)] == [3, 1, 2, 4]
         assert scheduler.state == SchedulerState.CONNECTED
 
-    # Waiting live frames must survive an outage
+    # Waiting live frames must survive an outage before migration is due
     def check_live_queue_survives_outage() -> None:
         scheduler = FrameScheduler()
-        frame = _make_frame(1, None)
+        frame = _make_frame(1, 0.50)
         scheduler.add_frame(frame)
         scheduler.set_connected(False)
 
@@ -212,6 +210,7 @@ def test_scheduler_modes() -> None:
 # Unresolved transmission tests
 # ============================================================
 
+
 # Check that selection never counts as successful delivery
 def test_inflight_retention() -> None:
     """
@@ -226,8 +225,8 @@ def test_inflight_retention() -> None:
     # Reserving a frame must block another reservation until acknowledgment
     def check_reservation_and_acknowledgment() -> None:
         scheduler = FrameScheduler()
-        first = _make_frame(1, None)
-        second = _make_frame(2, None)
+        first = _make_frame(1, 0.50)
+        second = _make_frame(2, 0.50)
         scheduler.add_frame(first)
         scheduler.add_frame(second)
 
@@ -248,7 +247,7 @@ def test_inflight_retention() -> None:
     # An incorrect acknowledgment must leave the frame unresolved
     def check_wrong_acknowledgment() -> None:
         scheduler = FrameScheduler()
-        scheduler.add_frame(_make_frame(1, None))
+        scheduler.add_frame(_make_frame(1, 0.50))
         scheduler.reserve_next_frame()
 
         with pytest.raises(ValueError, match="in-flight frame"):
@@ -261,7 +260,7 @@ def test_inflight_retention() -> None:
         scheduler.acknowledge_frame(1)
         assert scheduler.pending_count() == 0
 
-    # The final banked frame must remain part of reintegration until acknowledged
+    # The final banked frame remains part of reintegration until acknowledged
     def check_outage_with_unresolved_bank_frame() -> None:
         scheduler = FrameScheduler()
         frame = _make_frame(1, 0.90)
@@ -296,3 +295,211 @@ def test_inflight_retention() -> None:
     check_reservation_and_acknowledgment()
     check_wrong_acknowledgment()
     check_outage_with_unresolved_bank_frame()
+
+
+# ============================================================
+# Frame score tests
+# ============================================================
+
+
+# Require valid scores in every operating state
+def test_frame_scores() -> None:
+    """
+    Reject missing or invalid scores and accept the two score boundaries
+
+    Return:
+        void
+    """
+
+    # Missing and invalid scores must fail at the handoff
+    def check_invalid_scores() -> None:
+        for score in [None, True, "0.5", -0.01, 1.01, float("nan"), float("inf")]:
+            with pytest.raises(ValueError):
+                _make_frame(1, score)
+
+        with pytest.raises(TypeError):
+            ImageFrame(frame_id=1, timestamp=0.0, image_bytes=b"test")
+
+    # Both ends of the allowed score range must remain valid
+    def check_boundaries() -> None:
+        assert _make_frame(1, 0.0).priority == 0.0
+        assert _make_frame(2, 1.0).priority == 1.0
+
+    check_invalid_scores()
+    check_boundaries()
+
+
+# ============================================================
+# Disconnected migration tests
+# ============================================================
+
+
+# Exercise the timer with a clock controlled by each check
+def test_live_migration() -> None:
+    """
+    Check timing, original arrival order and retention without real sleeps
+
+    Return:
+        void
+    """
+
+    # Move one oldest live frame after each full interval
+    def check_interval_and_oldest_frame() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        first = _make_frame(30, 0.20)
+        second = _make_frame(10, 0.90)
+        scheduler.add_frame(first)
+        scheduler.add_frame(second)
+        scheduler.set_connected(False)
+
+        now = 4.99
+        assert scheduler.migrate_live_frame() is None
+        assert scheduler.live_count() == 2
+
+        now = 5.0
+        assert scheduler.migrate_live_frame() is first
+        assert scheduler.migrate_live_frame() is None
+        assert scheduler.live_count() == 1
+        assert scheduler.stored_count() == 1
+        assert scheduler.pending_count() == 2
+
+        now = 10.0
+        assert scheduler.migrate_live_frame() is second
+        assert scheduler.live_count() == 0
+        assert scheduler.stored_count() == 2
+        assert scheduler.reserve_next_frame() is None
+
+        now = 15.0
+        assert scheduler.migrate_live_frame() is None
+
+        scheduler.set_connected(True)
+        assert scheduler.pop_next_frame() is second
+        assert scheduler.pop_next_frame() is first
+        assert scheduler.state == SchedulerState.CONNECTED
+
+    # Use original arrival order when migrated and banked scores tie
+    def check_original_arrival_order() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        earlier = _make_frame(30, 0.90)
+        later = _make_frame(10, 0.90)
+        scheduler.add_frame(earlier)
+        scheduler.set_connected(False)
+        scheduler.add_frame(later)
+
+        now = 5.0
+        assert scheduler.migrate_live_frame() is earlier
+        scheduler.set_connected(True)
+        assert scheduler.pop_next_frame() is earlier
+        assert scheduler.pop_next_frame() is later
+
+    # Retry reports must not postpone the next move
+    def check_repeated_down_reports() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        frame = _make_frame(1)
+        scheduler.add_frame(frame)
+        scheduler.set_connected(False)
+
+        now = 4.0
+        scheduler.set_connected(False)
+        now = 5.0
+        assert scheduler.migrate_live_frame() is frame
+
+    # A new outage must wait its own full interval
+    def check_timer_reset() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        frame = _make_frame(1)
+        scheduler.add_frame(frame)
+        scheduler.set_connected(False)
+
+        now = 3.0
+        scheduler.set_connected(True)
+        now = 20.0
+        assert scheduler.migrate_live_frame() is None
+        assert scheduler.live_count() == 1
+        scheduler.set_connected(False)
+
+        now = 24.99
+        assert scheduler.migrate_live_frame() is None
+        now = 25.0
+        assert scheduler.migrate_live_frame() is frame
+
+    # A waiting frame can move while the unresolved frame remains retained
+    def check_inflight_is_untouched() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        inflight = _make_frame(1)
+        waiting = _make_frame(2)
+        scheduler.add_frame(inflight)
+        scheduler.add_frame(waiting)
+        assert scheduler.reserve_next_frame() is inflight
+        scheduler.set_connected(False)
+
+        now = 5.0
+        assert scheduler.migrate_live_frame() is waiting
+        assert scheduler.inflight_count() == 1
+        assert scheduler.inflight_lane() == "live"
+        assert scheduler.pending_count() == 2
+
+        scheduler.set_connected(True)
+        assert scheduler.reserve_next_frame() is None
+        scheduler.acknowledge_frame(1)
+        assert scheduler.pop_next_frame() is waiting
+        assert scheduler.pending_count() == 0
+
+    # Late timer checks must not move a burst of frames
+    def check_late_poll() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        first = _make_frame(1)
+        second = _make_frame(2)
+        scheduler.add_frame(first)
+        scheduler.add_frame(second)
+        scheduler.set_connected(False)
+
+        now = 16.0
+        assert scheduler.migrate_live_frame() is first
+        assert scheduler.migrate_live_frame() is None
+        now = 21.0
+        assert scheduler.migrate_live_frame() is second
+
+    # Reintegration must keep waiting live frames in their existing lane
+    def check_no_migration_while_reintegrating() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        live = _make_frame(1)
+        scheduler.add_frame(live)
+        scheduler.set_connected(False)
+        scheduler.add_frame(_make_frame(2))
+        scheduler.set_connected(True)
+
+        now = 100.0
+        assert scheduler.state == SchedulerState.REINTEGRATING
+        assert scheduler.migrate_live_frame() is None
+        assert scheduler.pop_next_frame() is live
+
+    # The migration interval must be configurable and positive
+    def check_interval_setting() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(migration_interval=2.0, clock=lambda: now)
+        frame = _make_frame(1)
+        scheduler.add_frame(frame)
+        scheduler.set_connected(False)
+        now = 2.0
+        assert scheduler.migrate_live_frame() is frame
+
+        for interval in [0, -1, float("inf"), float("nan"), True, None]:
+            with pytest.raises(ValueError):
+                FrameScheduler(migration_interval=interval)
+
+    check_interval_and_oldest_frame()
+    check_original_arrival_order()
+    check_repeated_down_reports()
+    check_timer_reset()
+    check_inflight_is_untouched()
+    check_late_poll()
+    check_no_migration_while_reintegrating()
+    check_interval_setting()

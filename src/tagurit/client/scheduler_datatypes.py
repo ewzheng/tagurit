@@ -1,5 +1,5 @@
 """
-Define the operating states and internal priority bank entries
+Define operating states and entries for the live queue and priority bank
 """
 
 from dataclasses import dataclass, field
@@ -11,11 +11,7 @@ from tagurit.protocol import ImageFrame
 # Name the three modes used by the scheduler
 class SchedulerState(Enum):
     """
-    Identify the scheduler's current operating mode
-
-    Disconnected mode retains new scored frames
-    Reintegrating mode shares transmission between live and stored frames
-    Connected mode sends live frames in arrival order
+    Identify whether frames can be sent and which queues receive them
     """
 
     CONNECTED = "CONNECTED"
@@ -23,28 +19,38 @@ class SchedulerState(Enum):
     REINTEGRATING = "REINTEGRATING"
 
 
-# Hold the values used to order a frame in the priority bank
+# Keep the original arrival order with each waiting live frame
+@dataclass(frozen=True)
+class LiveQueueEntry:
+    """
+    Retain a live frame and its original scheduler arrival order
+
+    Parameters:
+        - arrival_order (int): Sequence number assigned when the frame arrives
+        - frame (ImageFrame): Scored image waiting for transmission
+    """
+
+    arrival_order: int  # Original arrival order at the scheduler
+    frame: ImageFrame  # Image waiting in the live queue
+
+
+# Order banked frames by score and then original arrival order
 @dataclass(order=True, frozen=True)
 class PriorityBankEntry:
     """
-    Order stored frames by highest priority and then earliest arrival
-    An unscored frame RAISES ValueError
+    Select higher scores first and earlier arrivals when scores match
+
+    Moving a live frame into the bank MUST preserve its arrival_order
 
     Parameters:
-        - arrival_order (int): Sequence number assigned when the frame is stored
-        - frame (ImageFrame): Scored image retained by this entry
+        - arrival_order (int): Sequence number assigned when the frame arrives
+        - frame (ImageFrame): Scored image held in the bank
     """
 
     sort_priority: float = field(init=False)  # Negative score for heap ordering
-    arrival_order: int                        # Earlier arrivals win equal scores
-    frame: ImageFrame = field(compare=False)  # Frame held by this entry
+    arrival_order: int                        # Original scheduler arrival order
+    frame: ImageFrame = field(compare=False)  # Image held by this entry
 
-    # Build the sorting value from the frame's score
+    # Set the heap sorting value while creating this frozen entry
     def __post_init__(self) -> None:
-
-        # Only scored frames can enter the priority bank
-        if self.frame.priority is None:
-            raise ValueError("A stored frame must have a priority score")
-
-        # Set the derived field while creating the frozen entry
         object.__setattr__(self, "sort_priority", -self.frame.priority)
