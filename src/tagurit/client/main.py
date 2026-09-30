@@ -1,7 +1,7 @@
 """
-Run the client using a frame source supplied by the caller
+Run the client using a scored frame source supplied by the caller
 
-Coordinate image arrivals, scheduling and Gabriel communication
+Coordinate arrivals, queue maintenance and Gabriel communication
 This module does not depend on simulation or model code
 """
 
@@ -19,17 +19,15 @@ from tagurit.protocol import ImageFrame
 # Run the client with a supplied frame source and event reporter
 async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[str, str, FrameScheduler], None]) -> None:
     """
-    Collect frames while Gabriel sends selected images and handles reconnection
+    Collect scored frames while Gabriel sends and reconnects as needed
 
-    Frame IDs MUST be unique within this run
-    Frames arriving while disconnected MUST have a priority score
-    The source must yield control while waiting so communication can continue
-
-    When the source ends, wait until all retained frames are acknowledged
-    Cancellation stops the client immediately and may leave unfinished work
+    Every frame MUST have a score and an ID unique within this run
+    The source MUST yield control while waiting so other tasks can continue
+    When input ends the client waits for all retained frames to be acknowledged
+    Cancellation stops the client and may leave unfinished work
 
     Parameters:
-        - frame_source (AsyncIterable[ImageFrame]): Stream of incoming frames
+        - frame_source (AsyncIterable[ImageFrame]): Stream of scored frames
         - report (Callable): Callback receiving event, detail and scheduler
 
     Return:
@@ -53,15 +51,14 @@ async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[
     async def collect_frames() -> None:
         nonlocal arrivals
 
-        # Route each supplied frame according to the current operating state
+        # Route every scored frame according to the current mode
         async for frame in frame_source:
             scheduler.add_frame(frame)
             arrivals += 1
-
             lane = "bank" if scheduler.state == SchedulerState.DISCONNECTED else "live"
             report_event("ARRIVE", f"Frame {frame.frame_id} -> {lane}")
 
-        # Keep transmission running after a finite source finishes
+        # Keep transmission and queue maintenance active after input ends
         report_event("INPUT", "Frame source ended; waiting for retained frames")
 
         while scheduler.pending_count():
@@ -69,17 +66,28 @@ async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[
 
         report_event("DRAINED", "All supplied frames acknowledged")
 
+    # Check the disconnected timer even while the image source is waiting
+    async def maintain_queues() -> None:
+        while True:
+            frame = scheduler.migrate_live_frame()
+
+            if frame is not None:
+                report_event("MIGRATE", f"Frame {frame.frame_id} live -> bank | priority={frame.priority:.2f}")
+
+            await asyncio.sleep(LOOP_INTERVAL_SECONDS)
+
     report_event("START", f"Session {session_id} | Actual transport health controls connectivity")
 
-    # Run collection and communication on the same event loop
+    # Serialize all three tasks on the same event loop
     tasks = [
         asyncio.create_task(collect_frames()),
-        asyncio.create_task(transport.run())
+        asyncio.create_task(transport.run()),
+        asyncio.create_task(maintain_queues())
     ]
 
     try:
 
-        # Finish after the source drains or surface an unexpected task failure
+        # Finish when the source drains or surface an unexpected task failure
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         for task in done:
@@ -87,7 +95,7 @@ async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[
 
     finally:
 
-        # Stop both tasks before reporting the remaining work
+        # Stop all tasks before reporting remaining work
         transport.stop_accepting()
 
         for task in tasks:
