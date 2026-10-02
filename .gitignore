@@ -1,3 +1,6 @@
+# llm bullshit
+.claude
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
@@ -273,6 +276,8 @@ Mkfile.old
 dkms.conf
 
 # --- Project ---
+docs/plans/*
+docs/specs/*
 data/
 native/build/
 .claude/settings.local.json
