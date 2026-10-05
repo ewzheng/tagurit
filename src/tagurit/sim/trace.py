@@ -2,12 +2,13 @@
 Format-agnostic types for a replayed image trace.
 
 A trace is one video sequence on disk: ordered frames, each with a nominal
-timestamp and the ground-truth boxes annotated on it. These types carry NO
+timestamp, the ground-truth boxes annotated on it, and, for datasets
+labelled per frame rather than per box, whether it holds a target. These types carry NO
 image data. A frame knows where its JPEG lives and reads it on demand, so
 building a Trace for a thousand-frame sequence costs a directory listing
 and one text parse, not a gigabyte of memory.
 
-Dataset parsers (``visdrone``, ``seadronessee``) produce these types
+Dataset parsers (``visdrone``, ``seadronessee``, ``framelist``) produce these types
 and ``dataloader`` hands them out. Everything downstream in ``sim``
 consumes them without knowing which dataset they came from: frame
 spacing comes from ``timestamp``, never from an assumed rate, and labels
@@ -17,7 +18,7 @@ compares directly against a COCO-trained detector.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,6 +83,8 @@ class TraceFrame:
         - timestamp (float): seconds since the first frame of the sequence
         - path (Path): the JPEG file
         - boxes (tuple[Box, ...]): ground truth on this frame, possibly empty
+        - target (bool | None): frame-level ground truth, whether the frame
+          holds a target; None when the dataset annotates boxes only
     """
 
     sequence: str
@@ -89,6 +92,26 @@ class TraceFrame:
     timestamp: float
     path: Path
     boxes: tuple[Box, ...]
+    target: bool | None = None
+
+    def has_target(self, dont_care: Collection[str] = ("ignored",)) -> bool | None:
+        """
+        Whether this frame holds something worth sending.
+
+        An explicit frame-level ``target`` wins. Otherwise any box whose label
+        is not a don't-care class makes it True and no boxes make it False.
+        A frame whose only boxes are don't-care regions is ambiguous: None.
+
+        Parameters:
+            - dont_care (Collection[str]): labels that mark regions to ignore
+
+        Return: True, False, or None when the frame cannot be called
+        """
+        if self.target is not None:
+            return self.target
+        if any(box.label not in dont_care for box in self.boxes):
+            return True
+        return None if self.boxes else False
 
     def read(self) -> bytes:
         """

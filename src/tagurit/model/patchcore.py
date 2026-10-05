@@ -32,19 +32,16 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import cv2
 import numpy as np
 
 from tagurit.model.device import pick_device
+from tagurit.model.preprocess import IMAGENET_MEAN, IMAGENET_STD, tiles_to_tensor
 
 if TYPE_CHECKING:
     import torch
     from anomalib.models.image.patchcore.torch_model import PatchcoreModel
 
 FORMAT_VERSION = 1
-
-IMAGENET_MEAN = (0.485, 0.456, 0.406)
-IMAGENET_STD = (0.229, 0.224, 0.225)
 
 
 @dataclass(frozen=True)
@@ -160,7 +157,7 @@ class PatchcoreScorer:
         count = 0
         with torch.no_grad():
             for batch in _batches(tiles, batch_size):
-                model(_to_tensor(batch, config.input_size, device))
+                model(_imagenet_tensor(batch, config.input_size, device))
                 count += len(batch)
             if count == 0:
                 raise ValueError("no tiles to fit on")
@@ -244,7 +241,7 @@ class PatchcoreScorer:
         scores: list[float] = []
         with torch.no_grad():
             for batch in _batches(tiles, self.batch_size):
-                result = self._model(_to_tensor(batch, self.config.input_size, self.device))
+                result = self._model(_imagenet_tensor(batch, self.config.input_size, self.device))
                 scores.extend(float(score) for score in result.pred_score.cpu())
         return scores
 
@@ -288,37 +285,15 @@ def _batches(tiles: Iterable[np.ndarray], size: int) -> Iterator[list[np.ndarray
         yield batch
 
 
-def _to_tensor(tiles: Sequence[np.ndarray], input_size: int, device: str) -> torch.Tensor:
+def _imagenet_tensor(tiles: Sequence[np.ndarray], size: int, device: str) -> torch.Tensor:
     """
-    Resize tiles to the backbone's input size and normalise them for ImageNet.
-
-    Downscaling uses area interpolation, which averages rather than skips
-    pixels, so small targets fade instead of vanishing. A tile that is not
-    a square uint8 RGB array RAISES ValueError.
+    Resize tiles and normalise them with ImageNet statistics, as the backbone expects.
 
     Parameters:
         - tiles (Sequence[np.ndarray]): uint8 RGB square tiles
-        - input_size (int): output side length
+        - size (int): backbone input side length
         - device (str): torch device for the result
 
-    Return: float tensor of shape (len(tiles), 3, input_size, input_size)
+    Return: float tensor of shape (len(tiles), 3, size, size)
     """
-    import torch
-
-    resized = []
-    for tile in tiles:
-        if tile.dtype != np.uint8 or tile.ndim != 3 or tile.shape[2] != 3:
-            raise ValueError(f"expected a uint8 RGB tile, got {tile.dtype} {tile.shape}")
-        if tile.shape[0] != tile.shape[1]:
-            raise ValueError(f"expected a square tile, got {tile.shape[1]}x{tile.shape[0]}")
-        if tile.shape[0] != input_size:
-            shrinking = tile.shape[0] > input_size
-            interpolation = cv2.INTER_AREA if shrinking else cv2.INTER_LINEAR
-            tile = cv2.resize(tile, (input_size, input_size), interpolation=interpolation)
-        resized.append(tile)
-
-    batch = torch.from_numpy(np.stack(resized)).to(device)
-    batch = batch.permute(0, 3, 1, 2).float().div_(255.0)
-    mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
-    std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
-    return (batch - mean) / std
+    return tiles_to_tensor(tiles, size, IMAGENET_MEAN, IMAGENET_STD, device)

@@ -63,8 +63,12 @@ Fallback tiers, in order. Finish one before starting the next.
 - `uv run python3 -m tagurit.cloudlet.image_receiver` — start the receiver
 - `uv run python3 -m tagurit.sim.run_client` — start the sample-image client demo
 - `uv run python scripts/fetch_data.py seadronessee` — fetch a dataset into `data/`
+- `uv run python scripts/make_sparse.py seadronessee` — build a synthetic sparse
+  stream of crops in `data/sparse-seadronessee`, about 1% holding a target
 - `uv run python scripts/fit_patchcore.py seadronessee --out data/models/seadronessee`
   — fit a PatchCore tagger bundle on target-free tiles
+- `uv run python scripts/calibrate_clip.py sparse-seadronessee --out data/models/clip-sds`
+  — set up a zero-shot CLIP tagger bundle, calibrated on target-free tiles
 - `uv run python scripts/score_trace.py data/models/seadronessee --manifest data/demo/manifest.csv`
   — score held-out frames, print ranking metrics, write a demo manifest
 

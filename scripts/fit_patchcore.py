@@ -8,9 +8,11 @@ Usage:
 Each sequence is split in time: its first ``--fit-fraction`` of frames
 supply tiles, and the rest are held out for ``scripts/score_trace.py``. A
 tile is normal when no ground-truth box of any class comes within
-``--margin`` pixels of it. Fit frames are shuffled, and up to
-``--tiles-per-frame`` normal tiles are drawn from each, filling the fitting
-set first and then a calibration set from later, disjoint frames. The
+``--margin`` pixels of it. A frame labelled as holding a target but with no
+boxes to place it supplies nothing, since any of its tiles could hold it.
+Fit frames are shuffled, and up to ``--tiles-per-frame`` normal tiles are
+drawn from each, filling the fitting set first and then a calibration set
+from later, disjoint frames. The
 calibration set's ``--percentile`` score becomes the raw score that maps to
 priority 0.5. Fitting always runs in float32; ``--half`` makes calibration
 and later scoring run in float16.
@@ -32,75 +34,13 @@ from pathlib import Path
 import numpy as np
 
 from tagurit.model.patchcore import PatchcoreConfig, PatchcoreScorer
-from tagurit.model.tiling import crop_tiles, decode_image, tile_grid
 from tagurit.sim import dataloader
+from tagurit.sim.normal_tiles import sample_normal_tiles
 from tagurit.sim.trace import TraceFrame
 from tagurit.tagging.bundle import save_patchcore_bundle
 from tagurit.tagging.priority import PriorityScale
 
 FIT_RECORD = "fit.json"
-
-
-def normal_tiles(
-    frame: TraceFrame, tile_size: int, margin: int, limit: int, rng: random.Random
-) -> list[np.ndarray]:
-    """
-    Draw up to ``limit`` tiles from one frame that no box comes near.
-
-    Crops are copied so the decoded frame can be freed.
-
-    Parameters:
-        - frame (TraceFrame): frame with its ground-truth boxes
-        - tile_size (int): tile side length, pixels
-        - margin (int): pixels a box is grown by before testing overlap
-        - limit (int): most tiles to take from this frame
-        - rng (random.Random): chooses among the free tiles
-
-    Return: copied uint8 RGB tiles, possibly none
-    """
-    image = decode_image(frame.read())
-    height, width = image.shape[:2]
-    free = [
-        tile
-        for tile in tile_grid(width, height, tile_size)
-        if not any(tile.overlaps(b.left, b.top, b.width, b.height, margin) for b in frame.boxes)
-    ]
-    chosen = rng.sample(free, min(limit, len(free)))
-    return [crop.copy() for crop in crop_tiles(image, chosen)]
-
-
-def collect(
-    frames: list[TraceFrame], want_fit: int, want_calibration: int, args: argparse.Namespace
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
-    """
-    Fill the fitting set, then the calibration set, from shuffled frames.
-
-    Running out of frames before both sets are full RAISES SystemExit naming
-    how many tiles were found, rather than fitting on fewer than asked.
-
-    Parameters:
-        - frames (list[TraceFrame]): candidate frames, used in the given order
-        - want_fit (int): tiles for the memory bank
-        - want_calibration (int): tiles for the priority reference
-        - args (argparse.Namespace): tile size, margin, per-frame limit, seed
-
-    Return: (fitting tiles, calibration tiles), drawn from disjoint frames
-    """
-    rng = random.Random(args.seed)
-    fit: list[np.ndarray] = []
-    calibration: list[np.ndarray] = []
-    for frame in frames:
-        target = fit if len(fit) < want_fit else calibration
-        room = (want_fit - len(fit)) if target is fit else (want_calibration - len(calibration))
-        limit = min(args.tiles_per_frame, room)
-        target.extend(normal_tiles(frame, args.tile_size, args.margin, limit, rng))
-        if len(fit) == want_fit and len(calibration) == want_calibration:
-            return fit, calibration
-    raise SystemExit(
-        f"found {len(fit)} fitting and {len(calibration)} calibration tiles in "
-        f"{len(frames)} frames; lower --fit-tiles or --calibration-tiles, "
-        "or raise --tiles-per-frame"
-    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -151,7 +91,14 @@ def main(argv: list[str] | None = None) -> None:
     print(f"{len(names)} sequences, {len(frames)} fit frames")
 
     started = time.perf_counter()
-    fit, calibration = collect(frames, args.fit_tiles, args.calibration_tiles, args)
+    fit, calibration = sample_normal_tiles(
+        frames,
+        [args.fit_tiles, args.calibration_tiles],
+        args.tile_size,
+        args.margin,
+        args.tiles_per_frame,
+        args.seed,
+    )
     print(
         f"collected {len(fit)} + {len(calibration)} normal tiles in "
         f"{time.perf_counter() - started:.1f}s"

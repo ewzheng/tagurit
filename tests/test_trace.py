@@ -57,3 +57,23 @@ def test_types_are_immutable(tmp_path: Path) -> None:
     with pytest.raises(AttributeError):
         frame.index = 2  # type: ignore[misc]
     assert frame.boxes[0] == make_box()
+
+
+@pytest.mark.parametrize(
+    ("target", "labels", "expected"),
+    [
+        (True, [], True),
+        (False, ["person"], False),
+        (None, ["ignored", "car"], True),
+        (None, [], False),
+        (None, ["ignored"], None),
+    ],
+)
+def test_has_target_prefers_the_frame_label_then_boxes(
+    tmp_path: Path, target: bool | None, labels: list[str], expected: bool | None
+) -> None:
+    boxes = tuple(make_box(label=label, dataset_label=label) for label in labels)
+    frame = TraceFrame(
+        sequence="seq", index=1, timestamp=0.0, path=tmp_path / "a.jpg", boxes=boxes, target=target
+    )
+    assert frame.has_target() is expected

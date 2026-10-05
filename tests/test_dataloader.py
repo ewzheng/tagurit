@@ -20,7 +20,12 @@ def visdrone_root(tmp_path: Path) -> Path:
 
 
 def test_datasets_are_named() -> None:
-    assert sorted(dataloader.DATASETS) == ["seadronessee", "visdrone"]
+    assert sorted(dataloader.DATASETS) == [
+        "seadronessee",
+        "sparse-seadronessee",
+        "sparse-visdrone",
+        "visdrone",
+    ]
 
 
 def test_data_root_is_under_data_dir() -> None:

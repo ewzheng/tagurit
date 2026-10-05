@@ -26,7 +26,7 @@ Downstream decides whether to keep it, when to send it, and how.
 |---|---|
 | `protocol.py` | Shared image handoff datatype and priority validation |
 | `orchestrator.py` | Reserved for future top-level camera, model and client integration |
-| `model/` | Tile-scoring models behind `scorer.TileScorer`: anomalib PatchCore, tiling, device choice; owned by Elias |
+| `model/` | Tile-scoring models behind `scorer.TileScorer`: anomalib PatchCore, zero-shot CLIP through `transformers`, shared tile preprocessing, tiling, device choice; owned by Elias |
 | `tagging/` | Frame priority from the most unusual tile, a non-saturating score mapping, and saved bundles; owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank, arbitration and in-flight frame ownership |
 | `client/scheduler_datatypes.py` | Operating states and internal priority bank entries |
@@ -34,7 +34,7 @@ Downstream decides whether to keep it, when to send it, and how.
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
-| `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders and ranking metrics |
+| `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders (box-annotated and frame-labelled), synthetic sparse crops, normal-tile sampling and ranking metrics |
 
 `sim/run_client.py` starts the demo by supplying sample frames to
 `client/main.py`. The future orchestrator will supply real frames through
@@ -55,12 +55,20 @@ The current scorer is PatchCore through anomalib: a frozen WideResNet-50
 embeds patches, and a tile's score is its largest distance to a memory bank
 of patches from normal tiles. `scripts/fit_patchcore.py` builds the bank
 from tiles that no ground-truth box comes near and saves a bundle directory;
-`scripts/score_trace.py` scores held-out frames, reports tile-level ranking
-metrics, and can write a manifest the client demo replays. Fitting holds
+`scripts/score_trace.py` scores held-out frames, reports frame-level and
+tile-level ranking metrics, and can write a manifest the client demo replays. Fitting holds
 every embedding in memory, so it runs on a laptop or the cloudlet; the edge
 device only loads a bundle and scores. Fitting always runs in float32; a
 bundle can score in float16, which matters on tensor-core GPUs such as the
 Jetson's and changes scores by well under one percent.
+
+Evaluation needs only frame-level labels: does a frame hold something worth
+sending. `TraceFrame.target` carries such a label, and `TraceFrame.has_target`
+falls back to boxes for box-annotated datasets. `sim/framelist.py` reads
+frame-labelled sequences from folders with a `frames.csv`. Public aerial
+datasets put a target in almost every frame, so `scripts/make_sparse.py`
+builds sparse streams from them by cutting fixed-size crops of real frames:
+mostly windows no box comes near, and a set share that hold one whole target.
 
 ## States
 
@@ -113,8 +121,9 @@ communication eventually allows the retained work to be delivered.
 
 - Edge target: NVIDIA Jetson Orin NX 8GB; currently a laptop
 - Cloudlet target: remote compute node; currently tested locally
-- Model: PatchCore anomaly scoring through anomalib (optional `model` extra);
-  YOLO with COCO classes remains a candidate scorer
+- Models: PatchCore anomaly scoring through anomalib, and zero-shot CLIP through
+  Hugging Face `transformers` (optional `model` extra). New models load through
+  `transformers` rather than model-specific packages
 - Middleware: Gabriel client and server using WebSockets over TCP
 - Python: 3.12+, with dependencies managed by uv
 
@@ -134,6 +143,8 @@ communication eventually allows the retained work to be delivered.
   maximum over many tiles, so target-free frames land somewhat above 0.5
 - PatchCore treats anything absent from its bank as unusual: new terrain,
   lighting or camera altitude raises every score until the bank is refitted
+- The sparse streams are synthetic: crops are smaller than real frames, empty
+  crops may hold unannotated targets, and they share scenes with the fit data
 - On the Jetson's JetPack 6 the only Python 3.12 CUDA PyTorch build is torch
   2.8 from the Jetson AI Lab `jp6/cu129` index; it is untested on the device
 
