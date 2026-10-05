@@ -14,8 +14,8 @@ Fit frames are shuffled, and up to ``--tiles-per-frame`` normal tiles are
 drawn from each, filling the fitting set first and then a calibration set
 from later, disjoint frames. The
 calibration set's ``--percentile`` score becomes the raw score that maps to
-priority 0.5. Fitting always runs in float32; ``--half`` makes calibration
-and later scoring run in float16.
+priority 0.5. Fitting always runs in float32; calibration and later scoring
+run in float16 unless ``--no-half`` is given.
 
 The bundle directory gets ``tagger.json`` and ``patchcore.pt`` from
 ``tagurit.tagging.bundle``, plus ``fit.json``, which records the split so
@@ -72,7 +72,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--coreset-ratio", type=float, default=PatchcoreConfig.coreset_ratio)
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--half", action="store_true", help="score in float16 after fitting")
+    parser.add_argument(
+        "--half",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="score in float16 after fitting (default); --no-half for float32",
+    )
     args = parser.parse_args(argv)
 
     if not 0.0 < args.fit_fraction < 1.0:

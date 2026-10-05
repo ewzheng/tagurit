@@ -65,7 +65,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--backgrounds", nargs="+", help="background prompts; default ClipConfig's")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--half", action="store_true", help="score in float16")
+    parser.add_argument(
+        "--half",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="score in float16 (default); --no-half for float32",
+    )
     args = parser.parse_args(argv)
 
     if not 0.0 < args.fit_fraction < 1.0:
