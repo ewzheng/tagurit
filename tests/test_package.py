@@ -12,7 +12,14 @@ MODULES = [
     "tagurit.protocol",
     "tagurit.orchestrator",
     "tagurit.model",
+    "tagurit.model.device",
+    "tagurit.model.patchcore",
+    "tagurit.model.scorer",
+    "tagurit.model.tiling",
     "tagurit.tagging",
+    "tagurit.tagging.bundle",
+    "tagurit.tagging.priority",
+    "tagurit.tagging.tagger",
     "tagurit.client",
     "tagurit.client.config",
     "tagurit.client.scheduler_datatypes",
@@ -34,6 +41,7 @@ MODULES = [
     "tagurit.sim.dataloader",
     "tagurit.sim.visdrone",
     "tagurit.sim.seadronessee",
+    "tagurit.sim.metrics",
 ]
 
 

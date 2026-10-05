@@ -14,6 +14,13 @@ dependencies = [
     "websockets>=17.1",
 ]
 
+[project.optional-dependencies]
+model = [
+    "anomalib>=2.6.2",
+    "torch>=2.8",
+    "torchvision>=0.23",
+]
+
 [dependency-groups]
 dev = [
     "huggingface-hub>=1.32.0",

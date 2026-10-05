@@ -1,7 +1,10 @@
-.PHONY: sync test lint fmt data
+.PHONY: sync sync-model test lint fmt data
 
 sync:
 	uv sync
+
+sync-model:
+	uv sync --extra model
 
 test:
 	uv run pytest

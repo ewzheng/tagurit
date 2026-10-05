@@ -55,11 +55,18 @@ Fallback tiers, in order. Finish one before starting the next.
 ## Commands
 
 - `make sync` — install dependencies into `.venv` using `uv sync`
+- `make sync-model` — also install the `model` extra (anomalib, torch);
+  a plain `make sync` afterwards removes it again
 - `make test` — `uv run pytest`
 - `make lint` — check lint rules and formatting
 - `make fmt` — `uv run ruff format .`
 - `uv run python3 -m tagurit.cloudlet.image_receiver` — start the receiver
 - `uv run python3 -m tagurit.sim.run_client` — start the sample-image client demo
+- `uv run python scripts/fetch_data.py seadronessee` — fetch a dataset into `data/`
+- `uv run python scripts/fit_patchcore.py seadronessee --out data/models/seadronessee`
+  — fit a PatchCore tagger bundle on target-free tiles
+- `uv run python scripts/score_trace.py data/models/seadronessee --manifest data/demo/manifest.csv`
+  — score held-out frames, print ranking metrics, write a demo manifest
 
 The demo requires `data/demo/manifest.csv` and its referenced images.
 These files are local and are not included in a fresh clone.

@@ -26,19 +26,41 @@ Downstream decides whether to keep it, when to send it, and how.
 |---|---|
 | `protocol.py` | Shared image handoff datatype and priority validation |
 | `orchestrator.py` | Reserved for future top-level camera, model and client integration |
-| `model/` | Perception model integration, owned by Elias |
-| `tagging/` | Converts detections into frame priority scores, owned by Elias |
+| `model/` | Tile-scoring models behind `scorer.TileScorer`: anomalib PatchCore, tiling, device choice; owned by Elias |
+| `tagging/` | Frame priority from the most unusual tile, a non-saturating score mapping, and saved bundles; owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank, arbitration and in-flight frame ownership |
 | `client/scheduler_datatypes.py` | Operating states and internal priority bank entries |
 | `client/gabriel_transport.py` | One Gabriel image producer, receipt matching, timeouts, retries and communication-health reporting |
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
-| `sim/` | Manifest image feeder, optional scheduled connectivity and console demo |
+| `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders and ranking metrics |
 
 `sim/run_client.py` starts the demo by supplying sample frames to
 `client/main.py`. The future orchestrator will supply real frames through
 the same interface without depending on `sim/`.
+
+## Tagging
+
+A frame is decoded and cut into a grid of square tiles (512 px by default),
+because aerial targets are a few dozen pixels across and would vanish if the
+whole frame were resized to the model's input. A `TileScorer` gives each tile
+a raw score. The frame's raw score is its highest tile score, and
+`s / (s + reference)` maps it into [0, 1). The mapping never saturates, so
+the bank's highest-score-first order is preserved instead of collapsing into
+ties at 1.0. `reference` is a high percentile of scores on target-free tiles,
+so 0.5 means "as unusual as the most unusual normal tiles".
+
+The current scorer is PatchCore through anomalib: a frozen WideResNet-50
+embeds patches, and a tile's score is its largest distance to a memory bank
+of patches from normal tiles. `scripts/fit_patchcore.py` builds the bank
+from tiles that no ground-truth box comes near and saves a bundle directory;
+`scripts/score_trace.py` scores held-out frames, reports tile-level ranking
+metrics, and can write a manifest the client demo replays. Fitting holds
+every embedding in memory, so it runs on a laptop or the cloudlet; the edge
+device only loads a bundle and scores. Fitting always runs in float32; a
+bundle can score in float16, which matters on tensor-core GPUs such as the
+Jetson's and changes scores by well under one percent.
 
 ## States
 
@@ -91,7 +113,8 @@ communication eventually allows the retained work to be delivered.
 
 - Edge target: NVIDIA Jetson Orin NX 8GB; currently a laptop
 - Cloudlet target: remote compute node; currently tested locally
-- Model target: lightweight YOLO with COCO classes
+- Model: PatchCore anomaly scoring through anomalib (optional `model` extra);
+  YOLO with COCO classes remains a candidate scorer
 - Middleware: Gabriel client and server using WebSockets over TCP
 - Python: 3.12+, with dependencies managed by uv
 
@@ -105,10 +128,18 @@ communication eventually allows the retained work to be delivered.
 - Stopping either application loses its in-memory records
 - The repeating demo stops immediately on Ctrl+C and may leave queued frames
 - The receiver accepts images but does not yet run a heavy model
+- Tagging is blocking compute; the orchestrator must call it off the asyncio
+  loop, for example with `asyncio.to_thread`, or it stalls transport
+- The priority reference is calibrated on tiles, while frames take the
+  maximum over many tiles, so target-free frames land somewhat above 0.5
+- PatchCore treats anything absent from its bank as unusual: new terrain,
+  lighting or camera altitude raises every score until the bank is refitted
+- On the Jetson's JetPack 6 the only Python 3.12 CUDA PyTorch build is torch
+  2.8 from the Jetson AI Lab `jp6/cu129` index; it is untested on the device
 
 ## Deferred
 
-- Real camera input and integration with Elias's model and tagging
+- Real camera input, and wiring `tagging.Tagger` into the frame source
 - Top-level integration through `orchestrator.py`
 - Adaptive compression in the client and corresponding cloudlet decoding,
   with wire-format changes in `shared/image_protocol.py`
