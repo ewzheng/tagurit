@@ -4,10 +4,11 @@ import struct
 from dataclasses import asdict, dataclass
 from uuid import UUID
 
-
 # Identify our message format and limit the metadata header size
-MESSAGE_MAGIC = b"DF01"
+MESSAGE_MAGIC = b"DF02"
+LEGACY_MESSAGE_MAGIC = b"DF01"
 MAX_HEADER_BYTES = 4096
+CODECS = {"jpeg", "h264", "h265"}
 
 
 # Hold one image and its stable application identity
@@ -16,7 +17,10 @@ class ImageMessage:
     session_id: str      # Client run that produced the image
     frame_id: int        # Image number within that run
     sha256: str          # Hash of the encoded image bytes
-    image_bytes: bytes  # Encoded JPEG contents
+    image_bytes: bytes  # Bytes sent over the network
+    codec: str = "jpeg"
+    width: int | None = None  # Original dimensions for padded video frames
+    height: int | None = None
 
 
 # Hold the receiver's confirmation for one image
@@ -43,17 +47,34 @@ def validate_identity(session_id: str, frame_id: int) -> None:
 
 
 # Hash the encoded image and attach its application identity
-def make_image_message(session_id: str, frame_id: int, image_bytes: bytes) -> ImageMessage:
+def make_image_message(
+    session_id: str,
+    frame_id: int,
+    image_bytes: bytes,
+    codec: str = "jpeg",
+    width: int | None = None,
+    height: int | None = None,
+) -> ImageMessage:
     validate_identity(session_id, frame_id)
 
     if not image_bytes:
         raise ValueError("Image bytes must not be empty")
+    if codec not in CODECS:
+        raise ValueError("Unsupported image codec")
+    if codec in ("h264", "h265"):
+        if any(type(value) is not int or not 0 < value <= 16384 for value in (width, height)):
+            raise ValueError("Video messages require valid original dimensions")
+    elif width is not None or height is not None:
+        raise ValueError("JPEG messages must not specify video dimensions")
 
     return ImageMessage(
         session_id=session_id,
         frame_id=frame_id,
         sha256=hashlib.sha256(image_bytes).hexdigest(),
-        image_bytes=image_bytes
+        image_bytes=image_bytes,
+        codec=codec,
+        width=width,
+        height=height,
     )
 
 
@@ -62,7 +83,10 @@ def encode_image(message: ImageMessage) -> bytes:
     header = json.dumps({
         "session_id": message.session_id,
         "frame_id": message.frame_id,
-        "sha256": message.sha256
+        "sha256": message.sha256,
+        "codec": message.codec,
+        "width": message.width,
+        "height": message.height,
     }).encode("utf-8")
 
     if len(header) > MAX_HEADER_BYTES:
@@ -75,7 +99,7 @@ def encode_image(message: ImageMessage) -> bytes:
 def decode_image(payload: bytes) -> ImageMessage:
 
     # Check the format marker and read the header length
-    if len(payload) < 8 or payload[:4] != MESSAGE_MAGIC:
+    if len(payload) < 8 or payload[:4] not in (MESSAGE_MAGIC, LEGACY_MESSAGE_MAGIC):
         raise ValueError("Unknown image message format")
 
     header_size = struct.unpack("!I", payload[4:8])[0]
@@ -83,14 +107,24 @@ def decode_image(payload: bytes) -> ImageMessage:
     if not 0 < header_size <= MAX_HEADER_BYTES or len(payload) <= 8 + header_size:
         raise ValueError("Incomplete or invalid image message")
 
-    # Separate the metadata from the encoded JPEG
+    # Separate the metadata from the encoded image
     header = json.loads(payload[8:8 + header_size].decode("utf-8"))
 
-    if not isinstance(header, dict) or set(header) != {"session_id", "frame_id", "sha256"}:
+    old_fields = {"session_id", "frame_id", "sha256"}
+    new_fields = old_fields | {"codec", "width", "height"}
+    expected_fields = old_fields if payload[:4] == LEGACY_MESSAGE_MAGIC else new_fields
+    if not isinstance(header, dict) or set(header) != expected_fields:
         raise ValueError("Invalid image metadata")
 
     image_bytes = payload[8 + header_size:]
-    message = make_image_message(header["session_id"], header["frame_id"], image_bytes)
+    message = make_image_message(
+        header["session_id"],
+        header["frame_id"],
+        image_bytes,
+        header.get("codec", "jpeg"),
+        header.get("width"),
+        header.get("height"),
+    )
 
     # The received contents must match the sender's hash
     if header["sha256"] != message.sha256:

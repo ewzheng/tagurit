@@ -20,6 +20,10 @@ GABRIEL_ENDPOINT = "ws://localhost:9099"
 GABRIEL_ENGINE_ID = "image_receiver"
 GABRIEL_PRODUCER_NAME = "images"
 
+# Transmit each selected JPEG as an independent H.264 frame
+IMAGE_CODEC = "h264"
+VIDEO_CRF = 32
+
 # Set how long to wait for startup and image receipts
 CONNECTION_TIMEOUT_SECONDS = 10.0
 RECEIPT_TIMEOUT_SECONDS = 10.0
