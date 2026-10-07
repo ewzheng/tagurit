@@ -1,4 +1,4 @@
-.PHONY: sync test lint fmt
+.PHONY: sync test lint fmt data
 
 sync:
 	uv sync
@@ -12,3 +12,7 @@ lint:
 
 fmt:
 	uv run ruff format .
+
+data:
+	uv run python scripts/fetch_data.py visdrone
+	uv run python scripts/fetch_data.py seadronessee
