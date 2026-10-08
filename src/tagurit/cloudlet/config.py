@@ -9,7 +9,7 @@ SERVER_PORT = 9099
 ENGINE_ID = "image_receiver"
 
 # Set the number of frames allowed in flight per producer
-NUM_TOKENS = 1
+NUM_TOKENS = 2
 
 # Set how many frames can wait inside the local Gabriel server
 INPUT_QUEUE_MAXSIZE = 2

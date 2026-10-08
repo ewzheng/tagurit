@@ -6,8 +6,10 @@ Only a matching receipt releases the scheduler's in-flight frame
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from gabriel_client.gabriel_client import InputProducer
@@ -37,6 +39,22 @@ from tagurit.shared.image_protocol import (
     make_image_message,
     validate_identity,
 )
+from tagurit.shared.telemetry import EventLog
+
+
+@dataclass
+class PendingTransmission:
+    """
+    Retain encoded contents and the submission time for one unresolved frame.
+
+    This mutable record belongs to the transport and stays on its event loop.
+    """
+
+    frame: ImageFrame
+    message: ImageMessage | None = None
+    wire: bytes | None = None
+    submitted_at: float | None = None
+    attempt: int | None = None
 
 
 # Separate invalid receipts from connection failures that can be retried
@@ -54,13 +72,18 @@ class GabrielTransport:
     Connect the scheduler to one Gabriel image producer
 
     Connection failures and timeouts trigger retries without discarding work
-    The unresolved image is retried before selecting another frame
+    Unresolved images are retried before selecting new frames
     Calls MUST run on the same event loop as the scheduler's other operations
 
     Parameters:
         - scheduler (FrameScheduler): Owner of waiting and unresolved frames
         - session_id (str): Stable UUID for this client run
         - report (Callable[[str, str], None]): Callback receiving event and detail
+        - codec (str): Image wire codec
+        - video_crf (int): Software encoder quality setting
+        - send_interval (float | None): Minimum seconds between encoded frame submissions
+        - endpoint (str): Gabriel WebSocket URL
+        - event_log (EventLog | None): Optional caller-owned CSV recorder
     """
 
     # Keep application state separate from each network connection
@@ -71,8 +94,19 @@ class GabrielTransport:
         report: Callable[[str, str], None],
         codec: str = IMAGE_CODEC,
         video_crf: int = VIDEO_CRF,
+        *,
+        send_interval: float | None = None,
+        endpoint: str = GABRIEL_ENDPOINT,
+        event_log: EventLog | None = None,
     ) -> None:
         validate_identity(session_id, 1)
+        if send_interval is None:
+            send_interval = SEND_INTERVAL_SECONDS
+        if not math.isfinite(send_interval) or send_interval < 0:
+            raise ValueError("Send interval must be finite and nonnegative")
+        self._send_interval = send_interval
+        self._endpoint = endpoint
+        self._event_log = event_log
         if codec not in ("jpeg", "h264", "h265"):
             raise ValueError("Unsupported transport image codec")
         if type(video_crf) is not int or not 0 <= video_crf <= 51:
@@ -88,10 +122,7 @@ class GabrielTransport:
         self._ready = False
 
         # Retain application work across connection attempts
-        self._pending_frame: ImageFrame | None = None
-        self._pending_message: ImageMessage | None = None
-        self._pending_wire: bytes | None = None
-        self._submitted_at: float | None = None
+        self._pending: dict[int, PendingTransmission] = {}
         self._last_submit = -float("inf")
 
         # Track connection attempts and receipt validation failures
@@ -126,10 +157,7 @@ class GabrielTransport:
         self._scheduler.set_connected(self._link_allowed and self._ready)
 
         if previous_state != self._scheduler.state:
-            self._report(
-                "STATE",
-                f"{previous_state.value} -> {self._scheduler.state.value}"
-            )
+            self._report("STATE", f"{previous_state.value} -> {self._scheduler.state.value}")
 
     # Stop selecting new work but still allow an unresolved image to retry
     def stop_accepting(self) -> None:
@@ -143,70 +171,70 @@ class GabrielTransport:
         """
         self._accepting = False
 
-    # Supply new work or retry the unresolved image on a fresh connection
+    # Gabriel acquires a connection token before asking for another payload.
     async def _produce(self, attempt: int) -> gabriel_pb2.InputFrame:
-
-        # Gabriel calls the producer after registration and token availability
+        if attempt != self._active_attempt:
+            raise asyncio.CancelledError()
         if not self._ready:
             self._ready = True
-            self._report("LINK", "Gabriel registered and ready")
+            self._report("LINK", f"Gabriel ready | client window={self._scheduler.window_size}")
             self._update_scheduler_connection()
 
         while self._active_attempt == attempt:
-            now = time.monotonic()
-
-            # Wait for availability, pacing and any outstanding receipt
-            pacing_ready = now - self._last_submit >= SEND_INTERVAL_SECONDS
-
-            if self._link_allowed and self._submitted_at is None and pacing_ready:
-                retrying = self._pending_frame is not None
-
-                # Existing unresolved work always takes priority over new work
-                if not retrying and self._accepting:
+            if self._receipt_error is not None:
+                raise ReceiptValidationError("Receipt validation failed") from self._receipt_error
+            pacing_ready = time.monotonic() - self._last_submit >= self._send_interval
+            if self._link_allowed and pacing_ready:
+                # Replay retained entries in reservation order before selecting new work.
+                pending = next((p for p in self._pending.values() if p.attempt != attempt), None)
+                retrying = pending is not None and pending.wire is not None
+                if pending is None and self._accepting:
                     frame = self._scheduler.reserve_next_frame()
-
                     if frame is not None:
-                        self._pending_frame = frame
-
-                # Encode only once. A cancelled attempt before submission may
-                # redo this work; every submitted retry uses the retained bytes.
-                if self._pending_frame is not None and self._pending_message is None:
-                    frame = self._pending_frame
-                    if self._codec in ("h264", "h265"):
-                        encoded, width, height = await asyncio.to_thread(
-                            encode_video, frame.image_bytes, self._codec, self._video_crf
-                        )
-                        self._pending_message = make_image_message(
-                            self._session_id, frame.frame_id, encoded, self._codec, width, height
-                        )
-                    else:
-                        self._pending_message = make_image_message(
-                            self._session_id, frame.frame_id, frame.image_bytes
-                        )
-
-                # Resend the retained message or submit the newly selected one
-                if self._pending_frame is not None:
-                    if self._pending_wire is None:
-                        self._pending_wire = encode_image(self._pending_message)
-                    self._submitted_at = now
-                    self._last_submit = now
-                    event = "RESEND" if retrying else "SUBMIT"
-
+                        pending = PendingTransmission(frame)
+                        self._pending[frame.frame_id] = pending
+                        self._record("selected", pending)
+                if pending is not None:
+                    frame = pending.frame
+                    if pending.message is None:
+                        self._record("encode_start", pending)
+                        if self._codec in ("h264", "h265"):
+                            encoded, width, height = await asyncio.to_thread(
+                                encode_video, frame.image_bytes, self._codec, self._video_crf
+                            )
+                            pending.message = make_image_message(
+                                self._session_id,
+                                frame.frame_id,
+                                encoded,
+                                self._codec,
+                                width,
+                                height,
+                            )
+                        else:
+                            pending.message = make_image_message(
+                                self._session_id, frame.frame_id, frame.image_bytes
+                            )
+                        self._record("encode_end", pending)
+                    if pending.wire is None:
+                        pending.wire = encode_image(pending.message)
+                    if attempt != self._active_attempt:
+                        raise asyncio.CancelledError()
+                    pending.submitted_at = time.monotonic()
+                    pending.attempt = attempt
+                    self._last_submit = pending.submitted_at
+                    self._record("submitted", pending, at=pending.submitted_at)
                     self._report(
-                        event,
-                        f"Frame {self._pending_frame.frame_id} "
-                        f"from {self._scheduler.inflight_lane()} | "
-                        f"{self._codec} | JPEG={len(self._pending_frame.image_bytes)}B "
-                        f"wire={len(self._pending_wire)}B"
+                        "RESEND" if retrying else "SUBMIT",
+                        f"Frame {frame.frame_id} "
+                        f"from {self._scheduler.inflight_lane(frame.frame_id)} | "
+                        f"{self._codec} | JPEG={len(frame.image_bytes)}B "
+                        f"wire={len(pending.wire)}B | "
+                        f"inflight={self._scheduler.inflight_count()}/{self._scheduler.window_size}",
                     )
-
                     return gabriel_pb2.InputFrame(
-                        payload_type=gabriel_pb2.PayloadType.IMAGE,
-                        byte_payload=self._pending_wire
+                        payload_type=gabriel_pb2.PayloadType.IMAGE, byte_payload=pending.wire
                     )
-
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
-
         raise asyncio.CancelledError()
 
     # Complete an image only after checking a receipt from the active connection
@@ -217,13 +245,14 @@ class GabrielTransport:
             return
 
         try:
-            frame = self._pending_frame
-            expected = self._pending_message
-
-            if frame is None or expected is None:
-                raise ValueError("Receipt arrived without an outstanding image")
-
             receipt = decode_receipt(result.string_result)
+            if receipt.session_id != self._session_id:
+                raise ValueError("Receipt identifies a different application session")
+            pending = self._pending.get(receipt.frame_id)
+            if pending is None or pending.message is None or pending.attempt != attempt:
+                raise ValueError("Receipt arrived without an outstanding submission")
+            frame = pending.frame
+            expected = pending.message
 
             # Match the receipt to the application identity
             same_session = receipt.session_id == expected.session_id
@@ -235,36 +264,47 @@ class GabrielTransport:
             # Match the receipt to the submitted image contents
             same_hash = receipt.sha256 == expected.sha256
             same_size = receipt.byte_count == len(expected.image_bytes)
-            same_dimensions = (
-                expected.codec == "jpeg"
-                or (receipt.width == expected.width and receipt.height == expected.height)
+            same_dimensions = expected.codec == "jpeg" or (
+                receipt.width == expected.width and receipt.height == expected.height
             )
 
             if not same_hash or not same_size or not same_dimensions:
                 raise ValueError("Receipt does not match the submitted image bytes")
 
+            # Record only validated receipts, before discarding retained bytes.
+            self._record("ack", pending)
+
             # Release retained work only after every receipt check passes
             previous_state = self._scheduler.state
             self._scheduler.acknowledge_frame(frame.frame_id)
-            self._pending_frame = None
-            self._pending_message = None
-            self._pending_wire = None
-            self._submitted_at = None
+            del self._pending[frame.frame_id]
             self.completed += 1
 
-            self._report(
-                "ACK",
-                f"Frame {frame.frame_id} received and retained by server"
-            )
+            self._report("ACK", f"Frame {frame.frame_id} received and retained by server")
 
             if previous_state != self._scheduler.state:
-                self._report(
-                    "STATE",
-                    f"{previous_state.value} -> {self._scheduler.state.value}"
-                )
+                self._report("STATE", f"{previous_state.value} -> {self._scheduler.state.value}")
 
         except (ValueError, TypeError, AttributeError) as error:
             self._receipt_error = error
+
+    def _record(self, event: str, pending: PendingTransmission, *, at: float | None = None) -> None:
+        if self._event_log is None:
+            return
+        self._event_log.record(
+            event,
+            self._session_id,
+            pending.frame.frame_id,
+            at=at,
+            live_count=self._scheduler.live_count(),
+            bank_count=self._scheduler.stored_count(),
+            inflight_count=self._scheduler.inflight_count(),
+            codec=self._codec,
+            jpeg_bytes=len(pending.frame.image_bytes),
+            wire_bytes=len(pending.wire) if pending.wire is not None else 0,
+            attempt=self._active_attempt or 0,
+            submitted_count=sum(p.attempt == self._active_attempt for p in self._pending.values()),
+        )
 
     # Build a new Gabriel client with fresh connection and token state
     def _create_client(self, attempt: int) -> WebsocketClient:
@@ -280,19 +320,16 @@ class GabrielTransport:
         producer = InputProducer(
             producer=produce,
             target_engine_ids=[GABRIEL_ENGINE_ID],
-            producer_name=GABRIEL_PRODUCER_NAME
+            producer_name=GABRIEL_PRODUCER_NAME,
         )
 
         return WebsocketClient(
-            server_endpoint=GABRIEL_ENDPOINT,
-            input_producers=[producer],
-            consumer=consume
+            server_endpoint=self._endpoint, input_producers=[producer], consumer=consume
         )
 
     # Watch one connection for termination or missing receipts
     async def _watch_connection(self, client_task: asyncio.Task[Any], started: float) -> None:
         while True:
-
             # Invalid receipts are surfaced as application errors
             if self._receipt_error is not None:
                 raise ReceiptValidationError("Receipt validation failed") from self._receipt_error
@@ -309,9 +346,12 @@ class GabrielTransport:
                 raise TimeoutError("Gabriel did not become ready")
 
             # Require a matching receipt within the transmission timeout
-            if self._submitted_at is not None:
-                if now - self._submitted_at > RECEIPT_TIMEOUT_SECONDS:
-                    raise TimeoutError("No matching receipt arrived")
+            for pending in self._pending.values():
+                if pending.submitted_at is not None:
+                    if now - pending.submitted_at > RECEIPT_TIMEOUT_SECONDS:
+                        raise TimeoutError(
+                            f"No matching receipt for frame {pending.frame.frame_id}"
+                        )
 
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
 
@@ -331,7 +371,6 @@ class GabrielTransport:
             self._attempt_number += 1
             self._active_attempt = self._attempt_number
             self._ready = False
-            self._submitted_at = None
             self._receipt_error = None
 
             # Create fresh network state while keeping the application session
@@ -346,7 +385,6 @@ class GabrielTransport:
                 self._report("LINK", f"Connection unavailable: {error}")
 
             finally:
-
                 # Cancel the old connection before starting another attempt
                 self._active_attempt = None
                 self._ready = False
@@ -354,12 +392,11 @@ class GabrielTransport:
 
                 client_task.cancel()
                 await asyncio.gather(client_task, return_exceptions=True)
-                self._submitted_at = None
+                for pending in self._pending.values():
+                    pending.submitted_at = None
+                    pending.attempt = None
 
             # TimeoutError and ConnectionError are also subclasses of OSError
-            self._report(
-                "RETRY",
-                f"Next connection attempt in {RECONNECT_INTERVAL_SECONDS:g}s"
-            )
+            self._report("RETRY", f"Next connection attempt in {RECONNECT_INTERVAL_SECONDS:g}s")
 
             await asyncio.sleep(RECONNECT_INTERVAL_SECONDS)

@@ -55,3 +55,99 @@ grayscale SSIM against the pixels decoded from the source JPEG. Side-by-side
 images and full-resolution crops are saved in `data/compression/previews/`.
 Use `--limit 1 --crf 23` for a quick check. CRF values are codec-specific;
 compare codecs at similar measured quality, not just the same CRF number.
+
+## Configurable flow-control window
+
+Run the normal demo with matching window and server credit limits:
+
+```sh
+# Terminal 1: server credits; queue defaults to at least this size
+uv run python -m tagurit.cloudlet.image_receiver --tokens 2
+
+# Terminal 2: maximum reserved images (encoding or waiting for a receipt)
+uv run python -m tagurit.sim.run_client --window 2 --send-interval 0
+```
+
+Change both values to 4 to use four credits. The effective sending limit is
+bounded by the client window and server credits; a server configured with one
+token will still serialize submissions. `--queue-size` on the server must be
+at least `--tokens`; this sizing assumes one producer.
+
+Each frame retains its bytes until a matching receipt releases its own slot.
+On reconnect all unresolved frames are replayed before new work. Receipts may
+arrive out of order. Cached frames awaiting acknowledgment keep the scheduler
+in reintegration mode even when the waiting bank is empty.
+
+## One-token flow-control baseline
+
+Timing collection is opt-in and reusable. The regular demo uses its configured
+send interval; the finite benchmark defaults to **zero artificial send delay**.
+The regular client and cloudlet now default to two outstanding frames with no
+artificial send delay. The benchmark defaults to `--window 1` to preserve the
+one-token baseline; pass `--window 2` or `--window 4` for larger fixed windows.
+An adaptive controller is not implemented yet.
+
+Start the cloudlet in terminal 1 (choose a new event filename for each run):
+
+```sh
+uv run python -m tagurit.cloudlet.image_receiver --tokens 1 --events data/flow-control/server-events.csv
+```
+
+In terminal 2, send 28 deterministically sampled VisDrone validation images at
+10 arrivals/second. The source is preloaded before timing and assigns each frame
+an explicit priority of 0.5; it does not run perception or priority scoring.
+
+```sh
+uv run python scripts/benchmark_flow_control.py \
+  --count 28 --arrival-interval 0.1 --send-interval 0 \
+  --output data/flow-control/one-token-run
+```
+
+The client stops after all frames are acknowledged, or fails after `--timeout`
+seconds (default 120), preserving partial data. The server runs until Ctrl+C.
+Use a fresh output directory for each run. `--images` changes the JPEG directory;
+`--endpoint ws://HOST:9099` targets another machine. The server supports `--port`.
+Both paths currently use software H.264 at the configured CRF (default 32).
+
+Outputs under the gitignored `data/` directory:
+
+- `config.json`: run settings, codec, CRF and application in-flight limit.
+- `inputs.csv`: exact source paths, JPEG sizes, hashes and test priorities.
+- `client-events.csv`: arrival, scheduler selection, encode start/end, submission
+  and validated acknowledgment events, plus queue sizes at those events.
+- `frames.csv`: one row per arrival, including unfinished frames and retry counts.
+- `summary.json`: counts, delay median/p95/max, observed throughput and peak queue.
+- The separate server CSV records acceptance or duplicate handling, correlated
+  with client rows by session UUID and frame ID.
+
+Metric definitions:
+
+| Metric | Measurement |
+|---|---|
+| `queue_ms` | Client arrival to scheduler selection; excludes encoding |
+| `encode_ms` | Completed encoding attempts, including JPEG decode and FFmpeg startup |
+| `arrival_to_submit_ms` | Client arrival to first encoded-payload handoff to Gabriel |
+| `send_to_receipt_ms` | Last handoff to validated receipt; includes Gabriel scheduling, network and server decoding |
+| `arrival_to_receipt_ms` | Total time from client arrival until validated acknowledgment |
+| `attempts` | Number of submissions, including retries |
+
+Submission is the application handoff to Gabriel, not a packet-capture timestamp.
+Send-to-receipt is not pure network RTT. All durations use the client's monotonic
+clock. Server Unix timestamps provide correlation only: do not subtract clocks
+across hosts without synchronization. Retry-free send-to-receipt percentiles
+exclude retried frames because a response may belong to an earlier attempt.
+Unfinished frames remain visible and are excluded from completed-frame delays.
+CSV logging is synchronous and adds a small amount of overhead; keep it enabled
+consistently across comparisons.
+
+Throughput counts acknowledged application bytes including our image header,
+excluding WebSocket/TCP/IP overhead and retransmissions. It measures this workload,
+not available link capacity. A growing client queue means offered work exceeds
+completion rate; it does not by itself identify a network bottleneck. The local
+baseline includes software encode/decode costs and the configured arrival rate.
+
+For the two-token benchmark, start the receiver with `--tokens 2`, and add
+`--window 2` to the benchmark command with a fresh output directory.
+`max_submitted_frames` in the summary reports the observed peak number of
+submitted images awaiting a receipt; it can be smaller than the configured
+window when encoding or input arrival is slower than server responses.
