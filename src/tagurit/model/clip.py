@@ -137,8 +137,8 @@ class ClipScorer:
         inputs = {key: value.to(self.device) for key, value in tokenize(prompts).items()}
         with torch.no_grad():
             text = _embedding(self._model.get_text_features(**inputs)).float()
+            self._scale = float(self._model.logit_scale.exp())
         self._text = text / text.norm(dim=-1, keepdim=True)
-        self._scale = float(self._model.logit_scale.exp())
 
     @classmethod
     def load(

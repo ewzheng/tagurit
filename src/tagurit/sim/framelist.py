@@ -7,6 +7,7 @@ writes, and any frame-labelled set converted to it. One folder per sequence:
 
     <root>/<sequence>/frames.csv   file,target[,timestamp]  one row per frame, in order
     <root>/<sequence>/boxes.csv    optional: file,label,dataset_label,left,top,width,height
+    <root>/<sequence>/source.json  optional: {"times": [...]} of the source recording
     <root>/<sequence>/<file>       the images
 
 ``target`` is 1 or 0 and becomes ``TraceFrame.target``. Without a
@@ -15,11 +16,14 @@ indices are row numbers starting at one. Boxes are optional, follow the
 ``trace.Box`` xywh convention in absolute pixels, and leave track,
 truncation, and occlusion as None. A malformed row, a missing column, or a
 box naming a file that is not in ``frames.csv`` RAISES ValueError.
+``source.json`` gives the frame times of the recording the frames were cut
+from, which ``Trace.split`` uses to split them at the source's moments.
 """
 
 from __future__ import annotations
 
 import csv
+import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,6 +31,7 @@ from tagurit.sim.trace import Box, Trace, TraceFrame
 
 FRAMES_FILE = "frames.csv"
 BOXES_FILE = "boxes.csv"
+SOURCE_FILE = "source.json"
 BOX_COLUMNS = ("file", "label", "dataset_label", "left", "top", "width", "height")
 
 
@@ -77,7 +82,13 @@ def load(root: Path, name: str, fps: float = 30.0) -> Trace:
             )
     if boxes:
         raise ValueError(f"{folder / BOXES_FILE} names files not in {FRAMES_FILE}: {sorted(boxes)}")
-    return Trace(name=name, fps=fps, frames=tuple(frames))
+    source = folder / SOURCE_FILE
+    times = (
+        tuple(float(t) for t in json.loads(source.read_text())["times"])
+        if source.is_file()
+        else None
+    )
+    return Trace(name=name, fps=fps, frames=tuple(frames), source_times=times)
 
 
 def _boxes(path: Path) -> dict[str, list[Box]]:

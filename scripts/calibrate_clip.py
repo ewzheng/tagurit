@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     frames: list[TraceFrame] = []
     for name in names:
         trace = dataloader.load(args.dataset, name)
-        frames.extend(trace.frames[: int(len(trace) * args.fit_fraction)])
+        frames.extend(trace.split(args.fit_fraction)[0])
     random.Random(args.seed).shuffle(frames)
     [calibration] = sample_normal_tiles(
         frames,

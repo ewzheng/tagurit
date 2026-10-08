@@ -221,7 +221,7 @@ def main(argv: list[str] | None = None) -> None:
     frames: list[TraceFrame] = []
     for name in names:
         trace = dataloader.load(dataset, name)
-        frames.extend(trace.frames[int(len(trace) * record["fit_fraction"]) :: args.stride])
+        frames.extend(trace.split(record["fit_fraction"])[1][:: args.stride])
     frames = frames[: args.limit]
     if not frames:
         raise SystemExit("no held-out frames to score")

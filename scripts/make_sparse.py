@@ -15,8 +15,11 @@ before anything is written, target crops are thinned at random until each
 sequence's target share is at most ``--rate``. Without that, a crowded
 sequence would be mostly targets and a scorer could score well by
 recognising the sequence rather than the target. Crops keep the source
-order, so a time split on the result is a time split on the source and
-fitting never sees the frames that are scored.
+order and timestamp, and each sequence's ``source.json`` records the source
+frame times, so ``Trace.split`` cuts the crops at the same moment as the
+source. A bank fitted on either side of a split therefore never sees a
+frame scored from the other, whether it was fitted on the source or on the
+crops.
 
 Every frame of a source sequence must share the first frame's size; a
 frame that does not RAISES SystemExit.
@@ -43,7 +46,7 @@ from pathlib import Path
 import cv2
 
 from tagurit.sim import dataloader
-from tagurit.sim.framelist import BOX_COLUMNS, BOXES_FILE, FRAMES_FILE
+from tagurit.sim.framelist import BOX_COLUMNS, BOXES_FILE, FRAMES_FILE, SOURCE_FILE
 from tagurit.sim.sparse import (
     Window,
     boxes_in_window,
@@ -238,9 +241,12 @@ def main(argv: list[str] | None = None) -> None:
     rng = random.Random(args.seed)
     totals: Counter[str] = Counter()
     for name in args.sequences or names:
-        crops, counts = plan(dataloader.load(args.source, name), args, rng)
+        trace = dataloader.load(args.source, name)
+        crops, counts = plan(trace, args, rng)
         folder = out / name.replace("/", "-")
         write_crops(crops, folder, args.quality)
+        times = [frame.timestamp for frame in trace]
+        (folder / SOURCE_FILE).write_text(json.dumps({"times": times}) + "\n")
         totals.update(counts)
         print(
             f"{folder.name}: {counts['empty']} empty and {counts['target']} target crops; "

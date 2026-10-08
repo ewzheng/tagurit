@@ -5,7 +5,7 @@ Usage:
     uv run python scripts/fit_patchcore.py seadronessee --out data/models/seadronessee
     uv run python scripts/fit_patchcore.py seadronessee --out DIR --sequences NAME [NAME ...]
 
-Each sequence is split in time: its first ``--fit-fraction`` of frames
+Each sequence is split in time (``Trace.split``): its first ``--fit-fraction`` of frames
 supply tiles, and the rest are held out for ``scripts/score_trace.py``. A
 tile is normal when no ground-truth box of any class comes within
 ``--margin`` pixels of it. A frame labelled as holding a target but with no
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
     frames: list[TraceFrame] = []
     for name in names:
         trace = dataloader.load(args.dataset, name)
-        frames.extend(trace.frames[: int(len(trace) * args.fit_fraction)])
+        frames.extend(trace.split(args.fit_fraction)[0])
     random.Random(args.seed).shuffle(frames)
     print(f"{len(names)} sequences, {len(frames)} fit frames")
 

@@ -66,3 +66,10 @@ def test_boxes_for_unknown_files_are_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError):
         framelist.load(tmp_path, "seq")
+
+
+def test_source_times_come_from_source_json(tmp_path: Path) -> None:
+    folder = write_sequence(tmp_path, "seq", "file,target,timestamp\na.jpg,0,2.0\n")
+    assert framelist.load(tmp_path, "seq").source_times is None
+    (folder / framelist.SOURCE_FILE).write_text('{"times": [0, 1, 2, 3]}')
+    assert framelist.load(tmp_path, "seq").source_times == (0.0, 1.0, 2.0, 3.0)

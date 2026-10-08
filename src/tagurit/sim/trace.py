@@ -131,18 +131,57 @@ class Trace:
     playback is the caller's job. ``fps`` is recorded so a pacer has it
     and so the frames' timestamps are explained.
 
+    A trace drawn from a longer recording, such as a stream of crops cut
+    from a video, keeps that recording's frame times in ``source_times`` so
+    it splits at the same moment as the recording does (see ``split``).
+
     Parameters:
         - name (str): sequence name
         - fps (float): nominal frame rate the timestamps were derived from
         - frames (tuple[TraceFrame, ...]): every frame, ascending by index
+        - source_times (tuple[float, ...] | None): timestamps of every frame of
+          the source recording; None when the frames are the recording itself
     """
 
     name: str
     fps: float
     frames: tuple[TraceFrame, ...]
+    source_times: tuple[float, ...] | None = None
 
     def __iter__(self) -> Iterator[TraceFrame]:
         return iter(self.frames)
 
     def __len__(self) -> int:
         return len(self.frames)
+
+    def split(self, fraction: float) -> tuple[tuple[TraceFrame, ...], tuple[TraceFrame, ...]]:
+        """
+        Split frames in time: the leading ``fraction`` of the recording, and the rest.
+
+        The cut is the timestamp of recording frame ``int(n * fraction)``, n
+        being the number of frames in the recording (``source_times``, else
+        this trace's own frames). Frames before it lead and the rest trail.
+        On a trace that is its own recording this equals cutting the frame
+        list at that index. On a crop stream it cuts at the same moment as
+        the source does, and keeps every crop of one source frame on the
+        same side, so a model fitted on one side of either never sees a
+        frame scored from the other. A fraction outside [0, 1] RAISES
+        ValueError.
+
+        Parameters:
+            - fraction (float): leading share of the recording, 0 to 1
+
+        Return: (leading frames, trailing frames), each in trace order
+        """
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(f"fraction must be between 0 and 1, got {fraction}")
+        times = sorted(
+            self.source_times if self.source_times is not None else (f.timestamp for f in self)
+        )
+        cut = int(len(times) * fraction)
+        if cut >= len(times):
+            return self.frames, ()
+        cutoff = times[cut]
+        lead = tuple(f for f in self.frames if f.timestamp < cutoff)
+        trail = tuple(f for f in self.frames if f.timestamp >= cutoff)
+        return lead, trail

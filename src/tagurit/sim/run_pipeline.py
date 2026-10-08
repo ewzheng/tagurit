@@ -145,7 +145,7 @@ def select_frames(
     empties = 0
     for name in names:
         trace = dataloader.load(dataset, name)
-        for frame in trace.frames[int(len(trace) * fraction) :]:
+        for frame in trace.split(fraction)[1]:
             if frame.has_target():
                 frames.append(frame)
             else:
@@ -271,6 +271,10 @@ async def run_demo(
     """
     Run the pipeline with the console, and the dashboard when asked for.
 
+    A dashboard that fails, such as a window with no display to open on,
+    stops the pipeline and RAISES its error at once rather than letting the
+    run continue unseen.
+
     Parameters:
         - frames (Sequence[TraceFrame]): frames to replay
         - interval (float): seconds between releases
@@ -292,16 +296,22 @@ async def run_demo(
             show(recorder, tracker, start, window, video, pipeline, quit_requested)
         )
     try:
+        if drawer is not None:
+            await asyncio.wait({pipeline, drawer}, return_when=asyncio.FIRST_COMPLETED)
+            failure = drawer.exception() if drawer.done() and not drawer.cancelled() else None
+            if failure is not None:
+                raise failure  # e.g. no display; the finally block stops the pipeline
         await pipeline
     except asyncio.CancelledError:
-        # Ctrl+C cancels this task and the pipeline with it; only q is handled here.
+        # Ctrl+C cancels this task; only a q or Esc in the window is handled here.
         if not quit_requested.is_set():
             raise
         print("\nStopped from the window", flush=True)
     finally:
-        if drawer is not None:
-            drawer.cancel()
-            await asyncio.gather(drawer, return_exceptions=True)
+        tasks = [task for task in (pipeline, drawer) if task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
     return render(tracker, recorder.views, recorder.latest, time.monotonic() - start)
 
 

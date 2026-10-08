@@ -50,8 +50,11 @@ def tiny_clip() -> transformers.CLIPModel:
 
 
 def stub_tokenize(prompts: list[str]) -> dict[str, "torch.Tensor"]:
-    """Start token, one id per character, end token, zero padding."""
-    rows = [[1, *(3 + ord(c) % 40 for c in p[:10]), 2] for p in prompts]
+    """Start token, one id per character of the prompt's tail, end token, zero padding.
+
+    The tail, because every formatted prompt starts with the same template text.
+    """
+    rows = [[1, *(3 + ord(c) % 40 for c in p[-12:]), 2] for p in prompts]
     width = max(len(r) for r in rows)
     ids = torch.tensor([r + [0] * (width - len(r)) for r in rows])
     return {"input_ids": ids, "attention_mask": (ids != 0).long()}
@@ -80,13 +83,14 @@ def test_scores_are_target_probabilities() -> None:
     scores = make_scorer().score_tiles(tiles(5))
     assert len(scores) == 5
     assert all(0.0 <= s <= 1.0 for s in scores)
+    assert len({round(s, 6) for s in scores}) > 1  # prompts and tiles really differ
     assert make_scorer().score_tiles([]) == []
 
 
 def test_half_precision_stays_close() -> None:
     full = make_scorer().score_tiles(tiles(4))
     half = make_scorer(half=True).score_tiles(tiles(4))
-    assert np.allclose(full, half, atol=0.02)
+    assert np.allclose(full, half, atol=0.005)
 
 
 def test_bad_tiles_and_configs_are_rejected() -> None:

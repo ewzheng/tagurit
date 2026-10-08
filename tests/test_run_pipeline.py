@@ -85,3 +85,24 @@ def test_recorder_keeps_priority_thumbnail_and_best_tile() -> None:
     assert view.best_tile == (0.5, 0.0, 0.5, 1.0)
     assert recorder.priorities == {3: frame.priority}
     assert recorder.latest is not None and recorder.latest[0] == 3
+
+
+def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    cancelled = []
+
+    async def endless_pipeline(images: object, tagger: object, report: object) -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    class BrokenVideo:
+        def write(self, image: np.ndarray) -> None:
+            raise RuntimeError("no display")
+
+    monkeypatch.setattr(run_pipeline.orchestrator, "run", endless_pipeline)
+    recorder = run_pipeline.Recorder(object(), targets={})  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="no display"):
+        asyncio.run(run_pipeline.run_demo([], 0.0, recorder, {}, False, BrokenVideo()))  # type: ignore[arg-type]
+    assert cancelled == [True]
