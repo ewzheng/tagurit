@@ -41,6 +41,7 @@ import cv2
 import numpy as np
 
 from tagurit import orchestrator
+from tagurit.client.config import GABRIEL_ENDPOINT
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.protocol import ImageFrame
 from tagurit.sim import dataloader
@@ -221,6 +222,7 @@ async def show(
     window: bool,
     video: cv2.VideoWriter | None,
     pipeline: asyncio.Task[None],
+    quit_requested: asyncio.Event,
 ) -> None:
     """
     Redraw the dashboard at ``VIEW_FPS`` until cancelled.
@@ -237,6 +239,7 @@ async def show(
         - window (bool): show a window
         - video (cv2.VideoWriter | None): also write each redraw here
         - pipeline (asyncio.Task[None]): the running pipeline, to stop on q
+        - quit_requested (asyncio.Event): MUTATED, set before cancelling on q
 
     Return: void
     """
@@ -251,6 +254,7 @@ async def show(
         if window:
             cv2.imshow(WINDOW, image)
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                quit_requested.set()
                 pipeline.cancel()
                 return
         await asyncio.sleep(1 / VIEW_FPS)
@@ -279,15 +283,19 @@ async def run_demo(
     """
     start = time.monotonic()
     tracker = Tracker()
+    quit_requested = asyncio.Event()
     report = console(recorder.priorities, targets, tracker, start)
     pipeline = asyncio.create_task(orchestrator.run(replay(frames, interval), recorder, report))
     drawer = None
     if window or video is not None:
-        drawer = asyncio.create_task(show(recorder, tracker, start, window, video, pipeline))
+        drawer = asyncio.create_task(
+            show(recorder, tracker, start, window, video, pipeline, quit_requested)
+        )
     try:
         await pipeline
     except asyncio.CancelledError:
-        if not pipeline.cancelled():
+        # Ctrl+C cancels this task and the pipeline with it; only q is handled here.
+        if not quit_requested.is_set():
             raise
         print("\nStopped from the window", flush=True)
     finally:
@@ -342,6 +350,11 @@ def main(argv: list[str] | None = None) -> None:
     started = time.perf_counter()
     tagger = load_bundle(args.bundle, device=args.device)
     print(f"Loaded tagger from {args.bundle} in {time.perf_counter() - started:.1f}s", flush=True)
+    print(
+        f"Sending to {GABRIEL_ENDPOINT}; start the receiver first: "
+        "uv run python3 -m tagurit.cloudlet.image_receiver",
+        flush=True,
+    )
     print("Press Ctrl+C to stop | Queued frames are not drained on exit", flush=True)
 
     if args.view and sys.platform.startswith("linux"):
