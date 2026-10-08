@@ -20,19 +20,22 @@ from tagurit.client.config import (
     GABRIEL_ENDPOINT,
     GABRIEL_ENGINE_ID,
     GABRIEL_PRODUCER_NAME,
+    IMAGE_CODEC,
     LOOP_INTERVAL_SECONDS,
     RECEIPT_TIMEOUT_SECONDS,
     RECONNECT_INTERVAL_SECONDS,
-    SEND_INTERVAL_SECONDS
+    SEND_INTERVAL_SECONDS,
+    VIDEO_CRF,
 )
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.protocol import ImageFrame
+from tagurit.shared.image_codec import encode_video
 from tagurit.shared.image_protocol import (
     ImageMessage,
     decode_receipt,
     encode_image,
     make_image_message,
-    validate_identity
+    validate_identity,
 )
 
 
@@ -61,12 +64,25 @@ class GabrielTransport:
     """
 
     # Keep application state separate from each network connection
-    def __init__(self, scheduler: FrameScheduler, session_id: str, report: Callable[[str, str], None]) -> None:
+    def __init__(
+        self,
+        scheduler: FrameScheduler,
+        session_id: str,
+        report: Callable[[str, str], None],
+        codec: str = IMAGE_CODEC,
+        video_crf: int = VIDEO_CRF,
+    ) -> None:
         validate_identity(session_id, 1)
+        if codec not in ("jpeg", "h264", "h265"):
+            raise ValueError("Unsupported transport image codec")
+        if type(video_crf) is not int or not 0 <= video_crf <= 51:
+            raise ValueError("Video CRF must be an integer from 0 to 51")
 
         self._scheduler = scheduler
         self._session_id = session_id
         self._report = report
+        self._codec = codec
+        self._video_crf = video_crf
         self._accepting = True
         self._link_allowed = True
         self._ready = False
@@ -74,6 +90,7 @@ class GabrielTransport:
         # Retain application work across connection attempts
         self._pending_frame: ImageFrame | None = None
         self._pending_message: ImageMessage | None = None
+        self._pending_wire: bytes | None = None
         self._submitted_at: float | None = None
         self._last_submit = -float("inf")
 
@@ -150,14 +167,27 @@ class GabrielTransport:
 
                     if frame is not None:
                         self._pending_frame = frame
+
+                # Encode only once. A cancelled attempt before submission may
+                # redo this work; every submitted retry uses the retained bytes.
+                if self._pending_frame is not None and self._pending_message is None:
+                    frame = self._pending_frame
+                    if self._codec in ("h264", "h265"):
+                        encoded, width, height = await asyncio.to_thread(
+                            encode_video, frame.image_bytes, self._codec, self._video_crf
+                        )
                         self._pending_message = make_image_message(
-                            self._session_id,
-                            frame.frame_id,
-                            frame.image_bytes
+                            self._session_id, frame.frame_id, encoded, self._codec, width, height
+                        )
+                    else:
+                        self._pending_message = make_image_message(
+                            self._session_id, frame.frame_id, frame.image_bytes
                         )
 
                 # Resend the retained message or submit the newly selected one
                 if self._pending_frame is not None:
+                    if self._pending_wire is None:
+                        self._pending_wire = encode_image(self._pending_message)
                     self._submitted_at = now
                     self._last_submit = now
                     event = "RESEND" if retrying else "SUBMIT"
@@ -165,12 +195,14 @@ class GabrielTransport:
                     self._report(
                         event,
                         f"Frame {self._pending_frame.frame_id} "
-                        f"from {self._scheduler.inflight_lane()}"
+                        f"from {self._scheduler.inflight_lane()} | "
+                        f"{self._codec} | JPEG={len(self._pending_frame.image_bytes)}B "
+                        f"wire={len(self._pending_wire)}B"
                     )
 
                     return gabriel_pb2.InputFrame(
                         payload_type=gabriel_pb2.PayloadType.IMAGE,
-                        byte_payload=encode_image(self._pending_message)
+                        byte_payload=self._pending_wire
                     )
 
             await asyncio.sleep(LOOP_INTERVAL_SECONDS)
@@ -202,9 +234,13 @@ class GabrielTransport:
 
             # Match the receipt to the submitted image contents
             same_hash = receipt.sha256 == expected.sha256
-            same_size = receipt.byte_count == len(frame.image_bytes)
+            same_size = receipt.byte_count == len(expected.image_bytes)
+            same_dimensions = (
+                expected.codec == "jpeg"
+                or (receipt.width == expected.width and receipt.height == expected.height)
+            )
 
-            if not same_hash or not same_size:
+            if not same_hash or not same_size or not same_dimensions:
                 raise ValueError("Receipt does not match the submitted image bytes")
 
             # Release retained work only after every receipt check passes
@@ -212,6 +248,7 @@ class GabrielTransport:
             self._scheduler.acknowledge_frame(frame.frame_id)
             self._pending_frame = None
             self._pending_message = None
+            self._pending_wire = None
             self._submitted_at = None
             self.completed += 1
 

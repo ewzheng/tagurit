@@ -13,13 +13,12 @@ from tagurit.protocol import ImageFrame
 from tagurit.sim.connectivity import ConnectivityEvent, ConnectivityMonitor
 from tagurit.sim.image_feeder import feed_images
 
-
 # ============================================================
 # Shared test helpers
 # ============================================================
 
 # Create a frame for scheduler checks
-def _make_frame(frame_id: int, priority: float | None) -> ImageFrame:
+def _make_frame(frame_id: int, priority: float) -> ImageFrame:
     return ImageFrame(
         frame_id=frame_id,
         timestamp=0.0,
@@ -139,7 +138,7 @@ def test_connectivity() -> None:
         scheduler.set_connected(monitor.is_available())
         assert scheduler.state == SchedulerState.CONNECTED
 
-        scheduler.add_frame(_make_frame(1, None))
+        scheduler.add_frame(_make_frame(1, 0.5))
         assert _pop_id(scheduler) == 1
 
         # Advance to the outage and retain scored frames
@@ -158,7 +157,7 @@ def test_connectivity() -> None:
         scheduler.set_connected(monitor.is_available())
 
         for frame_id in [4, 5, 6, 7]:
-            scheduler.add_frame(_make_frame(frame_id, None))
+            scheduler.add_frame(_make_frame(frame_id, 0.5))
 
         # Repeated availability updates must not reset arbitration
         for expected_id in [4, 5, 3, 6, 7, 2]:
