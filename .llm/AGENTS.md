@@ -42,7 +42,7 @@ Fallback tiers, in order. Finish one before starting the next.
   - `cloudlet/` — image receiver, duplicate tracking and receipts
   - `shared/` — wire message types, encoding, decoding and hashes
   - `sim/` — sample image input, scheduled connectivity and demo entry point
-  - `orchestrator.py` — reserved for future top-level integration
+  - `orchestrator.py` — edge pipeline: tags captured images and runs the client
 - `tests/` — pytest checks for package imports, client, cloudlet and simulation
 - `docs/specs/` — design docs, named `YYYY-MM-DD-<topic>-design.md`
 - `docs/plans/` — implementation plans
@@ -70,6 +70,9 @@ Fallback tiers, in order. Finish one before starting the next.
   — set up a zero-shot CLIP tagger bundle, calibrated on target-free tiles
 - `uv run python scripts/score_trace.py data/models/seadronessee --manifest data/demo/manifest.csv`
   — score held-out frames, print ranking metrics, write a demo manifest
+- `uv run python3 -m tagurit.sim.run_pipeline data/models/sparse-seadronessee --empty-stride 5`
+  — end-to-end demo: replay held-out frames through tagging and the real client, with a
+  live dashboard window (`--video out.mp4` records it, `--no-view` for headless runs)
 
 The demo requires `data/demo/manifest.csv` and its referenced images.
 These files are local and are not included in a fresh clone.
@@ -88,8 +91,8 @@ These files are local and are not included in a fresh clone.
   frame. The transport reports communication availability and validated receipts.
 - Retain unresolved images until acknowledged. Retries preserve their identity
   and contents; the receiver suppresses duplicate acceptance.
-- `client/` must not import `sim/`. The demo supplies a frame source to the client;
-  the future orchestrator will supply real input through the same interface.
+- `client/` and `orchestrator.py` must not import `sim/`. Demos in `sim/` supply
+  frames or images through the same interfaces real input will use.
 - Use public interfaces instead of importing another component's private internals.
 - Keep heavy imports such as torch and ultralytics out of package `__init__.py`
   files so `import tagurit` stays cheap and tests stay fast.

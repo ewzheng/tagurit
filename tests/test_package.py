@@ -41,6 +41,8 @@ MODULES = [
     "tagurit.sim.connectivity",
     "tagurit.sim.image_feeder",
     "tagurit.sim.run_client",
+    "tagurit.sim.run_pipeline",
+    "tagurit.sim.pipeline_view",
     "tagurit.sim.trace",
     "tagurit.sim.dataloader",
     "tagurit.sim.visdrone",

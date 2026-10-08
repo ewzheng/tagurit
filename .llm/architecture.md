@@ -25,7 +25,7 @@ Downstream decides whether to keep it, when to send it, and how.
 | Module | Responsibility |
 |---|---|
 | `protocol.py` | Shared image handoff datatype and priority validation |
-| `orchestrator.py` | Reserved for future top-level camera, model and client integration |
+| `orchestrator.py` | Edge pipeline: stamps captured image bytes, tags them off the event loop into `ImageFrame`s, and runs the client on them |
 | `model/` | Tile-scoring models behind `scorer.TileScorer`: anomalib PatchCore, zero-shot CLIP through `transformers`, shared tile preprocessing, tiling, device choice; owned by Elias |
 | `tagging/` | Frame priority from the most unusual tile, a non-saturating score mapping, and saved bundles; owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank, arbitration and in-flight frame ownership |
@@ -37,9 +37,14 @@ Downstream decides whether to keep it, when to send it, and how.
 | `shared/image_codec.py` | Software H.264/H.265 encoding and decoding of independent frames |
 | `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders (box-annotated and frame-labelled), synthetic sparse crops, normal-tile sampling and ranking metrics |
 
-`sim/run_client.py` starts the demo by supplying sample frames to
-`client/main.py`. The future orchestrator will supply real frames through
-the same interface without depending on `sim/`.
+`sim/run_client.py` starts the queueing demo by supplying pre-scored sample
+frames to `client/main.py`. `sim/run_pipeline.py` is the end-to-end demo: it
+replays a dataset as captured image bytes into `orchestrator.run`, which tags
+each one with a bundle and feeds the same client, while `sim/pipeline_view.py`
+draws a live dashboard of the latest frame, the bank in send order and the
+frames sent, optionally recorded to MP4. The orchestrator takes
+images from any source and never imports `sim/`, so a camera source plugs in
+the same way.
 
 ## Tagging
 
@@ -142,8 +147,8 @@ communication eventually allows the retained work to be delivered.
 - Stopping either application loses its in-memory records
 - The repeating demo stops immediately on Ctrl+C and may leave queued frames
 - The receiver accepts images but does not yet run a heavy model
-- Tagging is blocking compute; the orchestrator must call it off the asyncio
-  loop, for example with `asyncio.to_thread`, or it stalls transport
+- The orchestrator tags one image at a time; a source faster than tagging is
+  slowed down rather than dropping stale frames as a live camera should
 - The priority reference is calibrated on tiles, while frames take the
   maximum over many tiles, so target-free frames land somewhat above 0.5
 - PatchCore treats anything absent from its bank as unusual: new terrain,
@@ -155,8 +160,7 @@ communication eventually allows the retained work to be delivered.
 
 ## Deferred
 
-- Real camera input, and wiring `tagging.Tagger` into the frame source
-- Top-level integration through `orchestrator.py`
+- Real camera input as an orchestrator image source
 - Jetson hardware encoding and adaptive codec or quality selection
 - Embedding transmission
 - Live learning on the cloudlet
