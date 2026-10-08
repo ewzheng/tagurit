@@ -13,9 +13,8 @@ The checkpoint 1 deck in `docs/materials/` provides the original project design.
 
 - A tagging and caching system light enough to run on the edge device (NVIDIA
   Jetson Orin NX 8GB), demoed end to end against a cloudlet.
-- Score frames on the device and use those scores to guide prioritized retention
-  and transmission. The current frame type also permits unscored live frames;
-  frames entering the priority bank must have a score.
+- Score every frame on the device and use those scores to guide prioritized
+  retention and transmission.
 - Then experiment: caching and transmission policies, and caching embeddings
   instead of raw images.
 

@@ -15,6 +15,7 @@ from gabriel_server import cognitive_engine, local_engine
 
 from tagurit.cloudlet.config import ENGINE_ID, INPUT_QUEUE_MAXSIZE, NUM_TOKENS, SERVER_PORT
 from tagurit.cloudlet.receiver_datatypes import AcceptedImage
+from tagurit.shared.image_codec import decode_video
 from tagurit.shared.image_protocol import ImageReceipt, decode_image, encode_receipt
 
 
@@ -82,7 +83,9 @@ class ImageReceiver(cognitive_engine.Engine):
         return len(self._accepted_images)
 
     # Validate new images or return the original receipt for a retry
-    def handle(self, input_frame: gabriel_pb2.InputFrame, client_info: Any) -> cognitive_engine.Result:
+    def handle(
+        self, input_frame: gabriel_pb2.InputFrame, client_info: Any
+    ) -> cognitive_engine.Result:
         """
         Accept a valid new image or acknowledge a matching retry
 
@@ -113,8 +116,13 @@ class ImageReceiver(cognitive_engine.Engine):
         if accepted is not None:
             same_hash = message.sha256 == accepted.message.sha256
             same_bytes = message.image_bytes == accepted.message.image_bytes
+            same_format = (
+                message.codec == accepted.message.codec
+                and message.width == accepted.message.width
+                and message.height == accepted.message.height
+            )
 
-            if not same_hash or not same_bytes:
+            if not same_hash or not same_bytes or not same_format:
                 return error_result("Image identity was reused with different contents")
 
             print(
@@ -127,9 +135,14 @@ class ImageReceiver(cognitive_engine.Engine):
 
         # Decode only images that have not already been accepted
         try:
-            encoded_image = np.frombuffer(message.image_bytes, dtype=np.uint8)
-            image = cv2.imdecode(encoded_image, cv2.IMREAD_COLOR)
-        except cv2.error as error:
+            if message.codec in ("h264", "h265"):
+                image = decode_video(
+                    message.image_bytes, message.codec, message.width, message.height
+                )
+            else:
+                encoded_image = np.frombuffer(message.image_bytes, dtype=np.uint8)
+                image = cv2.imdecode(encoded_image, cv2.IMREAD_COLOR)
+        except (cv2.error, ValueError) as error:
             return error_result(str(error))
 
         if image is None:

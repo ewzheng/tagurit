@@ -34,6 +34,7 @@ Downstream decides whether to keep it, when to send it, and how.
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
+| `shared/image_codec.py` | Software H.264/H.265 encoding and decoding of independent frames |
 | `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders (box-annotated and frame-labelled), synthetic sparse crops, normal-tile sampling and ranking metrics |
 
 `sim/run_client.py` starts the demo by supplying sample frames to
@@ -103,6 +104,10 @@ not release it from the scheduler.
 
 Each transmission includes a session UUID, frame ID and image hash.
 The client releases a frame only after receiving a matching receipt.
+The current default transcodes each JPEG to one independent H.264 frame at
+CRF 32. The wire header identifies its codec and original dimensions. The
+encoded bytes are retained unchanged across retries, and the cloudlet decodes
+them before returning a receipt.
 
 Connection failures and receipt timeouts cause the client to clean up the
 old connection, wait, and reconnect. The unresolved image is retried before
@@ -152,8 +157,7 @@ communication eventually allows the retained work to be delivered.
 
 - Real camera input, and wiring `tagging.Tagger` into the frame source
 - Top-level integration through `orchestrator.py`
-- Adaptive compression in the client and corresponding cloudlet decoding,
-  with wire-format changes in `shared/image_protocol.py`
+- Jetson hardware encoding and adaptive codec or quality selection
 - Embedding transmission
 - Live learning on the cloudlet
 - Bandwidth-aware scheduling and transmission

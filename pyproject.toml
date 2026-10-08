@@ -9,6 +9,7 @@ dependencies = [
     "gabriel-client==5.2.0",
     "gabriel-protocol==5.1",
     "gabriel-server==5.2.0",
+    "imageio-ffmpeg>=0.6.0",
     "numpy>=2.5.3",
     "opencv-python>=5.0.0.93",
     "websockets>=17.1",
