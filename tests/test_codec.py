@@ -24,7 +24,7 @@ def _jpeg(width: int, height: int) -> bytes:
     return encoded.tobytes()
 
 
-def test_h264_odd_dimensions_and_retry(monkeypatch) -> None:
+def test_h264_odd_dimensions_and_retry() -> None:
     """A lost receipt triggers the identical H.264 payload and one acceptance."""
     jpeg = _jpeg(17, 15)
     encoded, width, height = encode_video(jpeg, "h264", 32)
@@ -33,16 +33,15 @@ def test_h264_odd_dimensions_and_retry(monkeypatch) -> None:
 
     scheduler = FrameScheduler()
     session = "00000000-0000-0000-0000-000000000001"
-    transport = GabrielTransport(scheduler, session, lambda _event, _detail: None)
+    transport = GabrielTransport(scheduler, session, lambda _event, _detail: None, send_interval=0)
     transport._ready = True
     transport._active_attempt = 1
     transport._update_scheduler_connection()
     scheduler.add_frame(ImageFrame(1, 0.0, jpeg, 0.8))
-    monkeypatch.setattr("tagurit.client.gabriel_transport.SEND_INTERVAL_SECONDS", 0)
 
     async def transmit_twice():
         first = await transport._produce(1)
-        transport._submitted_at = None  # Simulate a lost receipt before reconnection.
+        transport._pending[1].submitted_at = None  # Simulate a lost receipt before reconnection.
         transport._active_attempt = 2
         second = await transport._produce(2)
         return first, second

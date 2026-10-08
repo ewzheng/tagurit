@@ -5,11 +5,13 @@ Image contents and scores come from the local manifest
 Communication uses the actual Gabriel connection
 """
 
+import argparse
 import asyncio
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 
+from tagurit.client.config import INFLIGHT_WINDOW, SEND_INTERVAL_SECONDS
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.protocol import ImageFrame
@@ -39,11 +41,7 @@ async def repeat_frames() -> AsyncIterator[ImageFrame]:
             found_frame = True
 
             # Give this simulated arrival its own ID and capture time
-            arriving_frame = replace(
-                frame,
-                frame_id=next_frame_id,
-                timestamp=time.time()
-            )
+            arriving_frame = replace(frame, frame_id=next_frame_id, timestamp=time.time())
             next_frame_id += 1
 
             yield arriving_frame
@@ -82,34 +80,34 @@ async def main() -> None:
     Return:
         void
     """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--window", type=int, default=INFLIGHT_WINDOW)
+    parser.add_argument("--send-interval", type=float, default=SEND_INTERVAL_SECONDS)
+    args = parser.parse_args()
     start_time = time.monotonic()
 
     # Print events with elapsed time and current queue sizes
     def report(event: str, detail: str, scheduler: FrameScheduler) -> None:
         elapsed = time.monotonic() - start_time
 
-        print(
-            f"\n{elapsed:6.2f}s | {event:<8} | "
-            f"{scheduler.state.value:<13} | {detail}"
-        )
+        print(f"\n{elapsed:6.2f}s | {event:<8} | {scheduler.state.value:<13} | {detail}")
         print(
             f"         Live {queue_display(scheduler.live_count())}  "
             f"Bank {queue_display(scheduler.stored_count())}  "
             f"In flight {scheduler.inflight_count()}",
-            flush=True
+            flush=True,
         )
 
     print("Local image demo with real Gabriel communication", flush=True)
     print("Press Ctrl+C to stop | Queued frames are not drained on exit", flush=True)
 
     try:
-        await run_client(repeat_frames(), report)
+        await run_client(
+            repeat_frames(), report, window_size=args.window, send_interval=args.send_interval
+        )
 
     finally:
-        print(
-            "Queues and in-flight data are memory-only and are lost on exit",
-            flush=True
-        )
+        print("Queues and in-flight data are memory-only and are lost on exit", flush=True)
 
 
 # Run the demo when this module is launched directly

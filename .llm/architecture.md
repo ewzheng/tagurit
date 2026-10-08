@@ -34,6 +34,8 @@ Downstream decides whether to keep it, when to send it, and how.
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
+| `shared/telemetry.py` | Optional CSV event recording for timing experiments |
+| `sim/flow_metrics.py` | Per-frame and aggregate baseline timing summaries |
 | `shared/image_codec.py` | Software H.264/H.265 encoding and decoding of independent frames |
 | `sim/` | Manifest image feeder, optional scheduled connectivity and console demo |
 
@@ -69,8 +71,13 @@ The current demo uses actual transport health. The schedule in
 
 ## Delivery and recovery
 
-Only one image is unresolved at a time. Selecting or sending a frame does
-not release it from the scheduler.
+The fixed client window is configurable and defaults to two reserved images.
+It counts both encoding and awaiting-receipt work. Each frame remains in a map
+owned by the scheduler until its matching receipt; acknowledgments may arrive
+out of order. Gabriel grants a separate server credit budget at registration.
+The effective sending limit is bounded by both budgets. A validated receipt
+releases exactly one application slot; invalid receipts halt the transport.
+Default artificial send pacing is zero.
 
 Each transmission includes a session UUID, frame ID and image hash.
 The client releases a frame only after receiving a matching receipt.
@@ -80,8 +87,10 @@ encoded bytes are retained unchanged across retries, and the cloudlet decodes
 them before returning a receipt.
 
 Connection failures and receipt timeouts cause the client to clean up the
-old connection, wait, and reconnect. The unresolved image is retried before
-new work, using the same identity and contents.
+old connection, wait, and reconnect. All unresolved images are replayed in reservation order before new work, using
+the same identities and encoded bytes. Each submitted frame has its own receipt
+deadline. Reconnection resets connection credits and submission times, while
+retaining payloads; callbacks from old connections are ignored.
 
 The receiver validates and decodes a new image, then retains it and its
 receipt before returning the acknowledgment. Matching retries return the
@@ -99,6 +108,30 @@ communication eventually allows the retained work to be delivered.
 - Model target: lightweight YOLO with COCO classes
 - Middleware: Gabriel client and server using WebSockets over TCP
 - Python: 3.12+, with dependencies managed by uv
+
+## Timing experiments
+
+`scripts/benchmark_flow_control.py` runs a finite, preloaded JPEG sample with
+explicit test priorities against a separately started cloudlet. Client event
+logging and the send interval are optional parameters of `run_client`; the
+regular demo accepts `--window` and `--send-interval`. The baseline sets the interval to
+zero and accepts `--window N` (default one for baseline compatibility). Raw events, input hashes, settings,
+per-frame delays and summary statistics are saved under gitignored `data/`.
+The cloudlet's optional `--events` CSV records acceptance using the same session
+and frame identity without changing the image wire format.
+
+Queue delay ends at scheduler selection; encoding is measured separately.
+Send-to-receipt starts at the encoded payload handoff to Gabriel, after encoding,
+and includes transport scheduling and cloudlet decoding. It is not network RTT.
+Durations use client monotonic time, never subtraction of server/client clocks.
+Retries preserve bytes and the original arrival event; retry-free latency
+percentiles exclude them. Incomplete runs retain unfinished rows.
+
+The cloudlet accepts `--tokens N` and `--queue-size N`. Its queue defaults to
+at least N and rejects smaller explicit values. Capacity sizing assumes one
+producer; additional clients share the server queue and may cause overload.
+The server allowance must be at least the desired client window to exercise
+that window fully. No dynamic window controller is implemented yet.
 
 ## Known limitations
 

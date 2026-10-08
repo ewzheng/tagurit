@@ -5,7 +5,10 @@ Accepted images and receipts remain in memory for the engine's lifetime
 Matching retries receive the original receipt without accepting another copy
 """
 
+import argparse
 import logging
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -17,6 +20,7 @@ from tagurit.cloudlet.config import ENGINE_ID, INPUT_QUEUE_MAXSIZE, NUM_TOKENS, 
 from tagurit.cloudlet.receiver_datatypes import AcceptedImage
 from tagurit.shared.image_codec import decode_video
 from tagurit.shared.image_protocol import ImageReceipt, decode_image, encode_receipt
+from tagurit.shared.telemetry import EventLog
 
 
 # Return an error without confirming image acceptance
@@ -31,10 +35,7 @@ def error_result(message: str) -> cognitive_engine.Result:
         Gabriel result containing the error
     """
     return cognitive_engine.Result(
-        status=gabriel_pb2.Status(
-            code=gabriel_pb2.StatusCode.ENGINE_ERROR,
-            message=message
-        )
+        status=gabriel_pb2.Status(code=gabriel_pb2.StatusCode.ENGINE_ERROR, message=message)
     )
 
 
@@ -51,7 +52,7 @@ def receipt_result(receipt: ImageReceipt) -> cognitive_engine.Result:
     """
     return cognitive_engine.Result(
         status=gabriel_pb2.Status(code=gabriel_pb2.StatusCode.SUCCESS),
-        payload=encode_receipt(receipt)
+        payload=encode_receipt(receipt),
     )
 
 
@@ -69,7 +70,8 @@ class ImageReceiver(cognitive_engine.Engine):
     """
 
     # Keep accepted images for the lifetime of this engine
-    def __init__(self) -> None:
+    def __init__(self, events_path: Path | None = None) -> None:
+        self._events = EventLog(events_path) if events_path is not None else None
         self._accepted_images: dict[tuple[str, int], AcceptedImage] = {}
 
     # Return how many unique images have been accepted
@@ -125,10 +127,12 @@ class ImageReceiver(cognitive_engine.Engine):
             if not same_hash or not same_bytes or not same_format:
                 return error_result("Image identity was reused with different contents")
 
+            if self._events is not None:
+                self._events.record("duplicate", message.session_id, message.frame_id)
             print(
                 f"DUPLICATE | session={message.session_id} | "
                 f"frame={message.frame_id} | returning original receipt",
-                flush=True
+                flush=True,
             )
 
             return receipt_result(accepted.receipt)
@@ -158,16 +162,24 @@ class ImageReceiver(cognitive_engine.Engine):
             sha256=message.sha256,
             byte_count=len(message.image_bytes),
             width=width,
-            height=height
+            height=height,
         )
 
         # Retain the image and receipt before Gabriel attempts to return the ACK
         self._accepted_images[key] = AcceptedImage(message=message, receipt=receipt)
 
+        if self._events is not None:
+            self._events.record(
+                "accepted",
+                message.session_id,
+                message.frame_id,
+                codec=message.codec,
+                wire_bytes=len(input_frame.byte_payload),
+            )
         print(
             f"ACCEPTED | session={message.session_id} | "
             f"frame={message.frame_id} | unique={self.accepted_count()}",
-            flush=True
+            flush=True,
         )
 
         return receipt_result(receipt)
@@ -181,20 +193,35 @@ def main() -> None:
     Return:
         void
     """
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--events", type=Path, help="Optional CSV of server acceptance times")
+    parser.add_argument("--port", type=int, default=SERVER_PORT)
+    parser.add_argument("--tokens", type=int, default=NUM_TOKENS)
+    parser.add_argument("--queue-size", type=int, default=None)
+    args = parser.parse_args()
+    if args.tokens < 1:
+        parser.error("tokens must be positive")
+    queue_size = (
+        max(INPUT_QUEUE_MAXSIZE, args.tokens) if args.queue_size is None else args.queue_size
+    )
+    if queue_size < args.tokens:
+        parser.error("queue-size must be at least tokens for a single producer")
+    if args.events is not None and args.events.exists():
+        parser.error(f"Event log already exists: {args.events}")
     logging.basicConfig(level=logging.INFO)
 
     server = local_engine.LocalEngine(
-        engine_factory=ImageReceiver,
-        input_queue_maxsize=INPUT_QUEUE_MAXSIZE,
-        port=SERVER_PORT,
-        num_tokens=NUM_TOKENS,
-        engine_id=ENGINE_ID
+        engine_factory=partial(ImageReceiver, events_path=args.events),
+        input_queue_maxsize=queue_size,
+        port=args.port,
+        num_tokens=args.tokens,
+        engine_id=ENGINE_ID,
     )
 
     print(
         f"Starting Gabriel image receiver | "
-        f"port={SERVER_PORT} | engine={ENGINE_ID}",
-        flush=True
+        f"port={args.port} | engine={ENGINE_ID} | tokens={args.tokens} | queue={queue_size}",
+        flush=True,
     )
 
     try:

@@ -11,12 +11,22 @@ import time
 from collections import deque
 from collections.abc import Callable
 
-from tagurit.client.config import LIVE_FRAME_WEIGHT, LIVE_TO_BANK_INTERVAL_SECONDS, STORED_FRAME_WEIGHT
-from tagurit.client.scheduler_datatypes import LiveQueueEntry, PriorityBankEntry, SchedulerState
+from tagurit.client.config import (
+    INFLIGHT_WINDOW,
+    LIVE_FRAME_WEIGHT,
+    LIVE_TO_BANK_INTERVAL_SECONDS,
+    STORED_FRAME_WEIGHT,
+)
+from tagurit.client.scheduler_datatypes import (
+    InflightEntry,
+    LiveQueueEntry,
+    PriorityBankEntry,
+    SchedulerState,
+)
 from tagurit.protocol import ImageFrame
 
 
-# Hold waiting frames and retain one selected frame until acknowledged
+# Hold waiting frames and retain selected frames until acknowledged
 class FrameScheduler:
     """
     Route scored frames and select their transmission order
@@ -29,11 +39,23 @@ class FrameScheduler:
         - live_weight (int): Live turns per reintegration cycle
         - stored_weight (int): Stored turns per reintegration cycle
         - migration_interval (float): Seconds between live-to-bank moves during outages
+        - window_size (int): Maximum number of reserved frames
         - clock (Callable): Monotonic clock used for timing and offline tests
     """
 
     # Create the queues, turn pattern and disconnected timer
-    def __init__(self, live_weight: int = LIVE_FRAME_WEIGHT, stored_weight: int = STORED_FRAME_WEIGHT, migration_interval: float = LIVE_TO_BANK_INTERVAL_SECONDS, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        live_weight: int = LIVE_FRAME_WEIGHT,
+        stored_weight: int = STORED_FRAME_WEIGHT,
+        migration_interval: float = LIVE_TO_BANK_INTERVAL_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        window_size: int = INFLIGHT_WINDOW,
+    ) -> None:
+
+        if type(window_size) is not int or window_size < 1:
+            raise ValueError("Window size must be a positive integer")
+        self._window_size = window_size
 
         # Reject invalid queue weights and timer intervals
         if type(live_weight) is not int or type(stored_weight) is not int:
@@ -59,14 +81,22 @@ class FrameScheduler:
         self._turn_pattern = [True] * live_weight + [False] * stored_weight
         self._turn_index = 0
 
-        # Keep one selected frame until its receipt arrives
-        self._inflight_frame: ImageFrame | None = None
-        self._inflight_from_bank = False
+        # Keep selected frames until its receipt arrives
+        self._inflight: dict[int, InflightEntry] = {}
 
         # Start the timer only when entering disconnected mode
         self._clock = clock
         self._migration_interval = migration_interval
         self._next_migration_at: float | None = None
+
+    @property
+    def window_size(self) -> int:
+        """
+        Return the configured maximum number of reserved frames.
+
+        Return: Positive in-flight window size
+        """
+        return self._window_size
 
     # Return the current mode
     @property
@@ -97,7 +127,9 @@ class FrameScheduler:
 
     # Update the mode and reset timers only on a state change
     def _update_state(self) -> None:
-        stored_work_remains = bool(self._priority_bank) or self._inflight_from_bank
+        stored_work_remains = bool(self._priority_bank) or any(
+            entry.from_bank for entry in self._inflight.values()
+        )
 
         if not self._connected:
             new_state = SchedulerState.DISCONNECTED
@@ -172,23 +204,25 @@ class FrameScheduler:
 
         # Preserve the frame and its original order when changing queues
         live_entry = self._live_queue[0]
-        bank_entry = PriorityBankEntry(arrival_order=live_entry.arrival_order, frame=live_entry.frame)
+        bank_entry = PriorityBankEntry(
+            arrival_order=live_entry.arrival_order, frame=live_entry.frame
+        )
         heapq.heappush(self._priority_bank, bank_entry)
         self._live_queue.popleft()
         return live_entry.frame
 
-    # Select one frame while keeping it in the in-flight slot
+    # Select a frame while retaining it in the in-flight window
     def reserve_next_frame(self) -> ImageFrame | None:
         """
         Select a waiting frame and retain it until acknowledgment
 
-        MUTATES the queues and in-flight slot
-        No frame is selected during an outage or while a receipt is outstanding
+        MUTATES the queues and in-flight window
+        No frame is selected during an outage or when the window is full
 
         Return:
             Selected ImageFrame or None
         """
-        if not self._connected or self._inflight_frame is not None:
+        if not self._connected or len(self._inflight) >= self._window_size:
             return None
 
         if not self._live_queue and not self._priority_bank:
@@ -203,14 +237,13 @@ class FrameScheduler:
             use_live_queue = self._turn_pattern[self._turn_index]
             self._turn_index = (self._turn_index + 1) % len(self._turn_pattern)
 
-            if use_live_queue and self._live_queue:
+            if self._live_queue and (use_live_queue or not self._priority_bank):
                 frame = self._live_queue.popleft().frame
             else:
                 frame = heapq.heappop(self._priority_bank).frame
                 from_bank = True
 
-        self._inflight_frame = frame
-        self._inflight_from_bank = from_bank
+        self._inflight[frame.frame_id] = InflightEntry(frame, from_bank)
         return frame
 
     # Release the selected frame after its receipt has been checked
@@ -227,11 +260,10 @@ class FrameScheduler:
         Return:
             void
         """
-        if self._inflight_frame is None or self._inflight_frame.frame_id != frame_id:
+        if frame_id not in self._inflight:
             raise ValueError("Receipt does not match the in-flight frame")
 
-        self._inflight_frame = None
-        self._inflight_from_bank = False
+        del self._inflight[frame_id]
         self._update_state()
 
     # Complete a selection immediately for offline scheduler tests
@@ -252,14 +284,20 @@ class FrameScheduler:
         return frame
 
     # Return which queue supplied the in-flight frame
-    def inflight_lane(self) -> str:
+    def inflight_lane(self, frame_id: int | None = None) -> str:
         """
         Read the origin of the unresolved frame
 
         Return:
             bank or live with live also returned when no frame is in flight
         """
-        return "bank" if self._inflight_from_bank else "live"
+        if frame_id is None:
+            if not self._inflight:
+                return "live"
+            if len(self._inflight) > 1:
+                raise ValueError("Specify a frame ID when multiple frames are in flight")
+            frame_id = next(iter(self._inflight))
+        return "bank" if self._inflight[frame_id].from_bank else "live"
 
     # Count waiting live frames
     def live_count(self) -> int:
@@ -287,14 +325,14 @@ class FrameScheduler:
         Count frames waiting for acknowledgment
 
         Return:
-            Zero or one
+            Number of reserved frames
         """
-        return int(self._inflight_frame is not None)
+        return len(self._inflight)
 
     # Count all unfinished work
     def pending_count(self) -> int:
         """
-        Count retained frames across both queues and the in-flight slot
+        Count retained frames across both queues and the in-flight window
 
         Return:
             Total number of unfinished frames
