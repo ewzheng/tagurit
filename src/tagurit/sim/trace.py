@@ -2,12 +2,13 @@
 Format-agnostic types for a replayed image trace.
 
 A trace is one video sequence on disk: ordered frames, each with a nominal
-timestamp and the ground-truth boxes annotated on it. These types carry NO
+timestamp, the ground-truth boxes annotated on it, and, for datasets
+labelled per frame rather than per box, whether it holds a target. These types carry NO
 image data. A frame knows where its JPEG lives and reads it on demand, so
 building a Trace for a thousand-frame sequence costs a directory listing
 and one text parse, not a gigabyte of memory.
 
-Dataset parsers (``visdrone``, ``seadronessee``) produce these types
+Dataset parsers (``visdrone``, ``seadronessee``, ``framelist``) produce these types
 and ``dataloader`` hands them out. Everything downstream in ``sim``
 consumes them without knowing which dataset they came from: frame
 spacing comes from ``timestamp``, never from an assumed rate, and labels
@@ -17,7 +18,7 @@ compares directly against a COCO-trained detector.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -82,6 +83,8 @@ class TraceFrame:
         - timestamp (float): seconds since the first frame of the sequence
         - path (Path): the JPEG file
         - boxes (tuple[Box, ...]): ground truth on this frame, possibly empty
+        - target (bool | None): frame-level ground truth, whether the frame
+          holds a target; None when the dataset annotates boxes only
     """
 
     sequence: str
@@ -89,6 +92,26 @@ class TraceFrame:
     timestamp: float
     path: Path
     boxes: tuple[Box, ...]
+    target: bool | None = None
+
+    def has_target(self, dont_care: Collection[str] = ("ignored",)) -> bool | None:
+        """
+        Whether this frame holds something worth sending.
+
+        An explicit frame-level ``target`` wins. Otherwise any box whose label
+        is not a don't-care class makes it True and no boxes make it False.
+        A frame whose only boxes are don't-care regions is ambiguous: None.
+
+        Parameters:
+            - dont_care (Collection[str]): labels that mark regions to ignore
+
+        Return: True, False, or None when the frame cannot be called
+        """
+        if self.target is not None:
+            return self.target
+        if any(box.label not in dont_care for box in self.boxes):
+            return True
+        return None if self.boxes else False
 
     def read(self) -> bytes:
         """
@@ -108,18 +131,57 @@ class Trace:
     playback is the caller's job. ``fps`` is recorded so a pacer has it
     and so the frames' timestamps are explained.
 
+    A trace drawn from a longer recording, such as a stream of crops cut
+    from a video, keeps that recording's frame times in ``source_times`` so
+    it splits at the same moment as the recording does (see ``split``).
+
     Parameters:
         - name (str): sequence name
         - fps (float): nominal frame rate the timestamps were derived from
         - frames (tuple[TraceFrame, ...]): every frame, ascending by index
+        - source_times (tuple[float, ...] | None): timestamps of every frame of
+          the source recording; None when the frames are the recording itself
     """
 
     name: str
     fps: float
     frames: tuple[TraceFrame, ...]
+    source_times: tuple[float, ...] | None = None
 
     def __iter__(self) -> Iterator[TraceFrame]:
         return iter(self.frames)
 
     def __len__(self) -> int:
         return len(self.frames)
+
+    def split(self, fraction: float) -> tuple[tuple[TraceFrame, ...], tuple[TraceFrame, ...]]:
+        """
+        Split frames in time: the leading ``fraction`` of the recording, and the rest.
+
+        The cut is the timestamp of recording frame ``int(n * fraction)``, n
+        being the number of frames in the recording (``source_times``, else
+        this trace's own frames). Frames before it lead and the rest trail.
+        On a trace that is its own recording this equals cutting the frame
+        list at that index. On a crop stream it cuts at the same moment as
+        the source does, and keeps every crop of one source frame on the
+        same side, so a model fitted on one side of either never sees a
+        frame scored from the other. A fraction outside [0, 1] RAISES
+        ValueError.
+
+        Parameters:
+            - fraction (float): leading share of the recording, 0 to 1
+
+        Return: (leading frames, trailing frames), each in trace order
+        """
+        if not 0.0 <= fraction <= 1.0:
+            raise ValueError(f"fraction must be between 0 and 1, got {fraction}")
+        times = sorted(
+            self.source_times if self.source_times is not None else (f.timestamp for f in self)
+        )
+        cut = int(len(times) * fraction)
+        if cut >= len(times):
+            return self.frames, ()
+        cutoff = times[cut]
+        lead = tuple(f for f in self.frames if f.timestamp < cutoff)
+        trail = tuple(f for f in self.frames if f.timestamp >= cutoff)
+        return lead, trail
