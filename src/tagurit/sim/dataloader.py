@@ -5,7 +5,8 @@ The sim never learns which dataset a Trace came from. Each parser module
 exposes ``sequences(root)`` and ``load(root, name, fps)`` over its own
 on-disk layout under ``data/<dataset>``; this module only names the
 datasets and dispatches. Adding a dataset is a new parser module and one
-entry in ``DATASETS``.
+entry in ``DATASETS``. Several datasets can share a parser: the synthetic
+sparse streams ``scripts/make_sparse.py`` writes all use ``framelist``.
 """
 
 from __future__ import annotations
@@ -13,12 +14,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import ModuleType
 
-from tagurit.sim import seadronessee, visdrone
+from tagurit.sim import framelist, seadronessee, visdrone
 from tagurit.sim.trace import Trace
 
 DATASETS: dict[str, ModuleType] = {
     "visdrone": visdrone,
     "seadronessee": seadronessee,
+    "sparse-visdrone": framelist,
+    "sparse-seadronessee": framelist,
 }
 
 DATA_DIR = Path("data")
