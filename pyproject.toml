@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 model = [
     "anomalib>=2.6.2",
+    "sentencepiece>=0.2.2",
     "torch>=2.8",
     "torchvision>=0.23",
     "transformers>=5.18.0",
