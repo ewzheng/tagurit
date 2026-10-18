@@ -30,6 +30,7 @@ from tagurit.client.config import (
     VIDEO_CRF,
 )
 from tagurit.client.frame_scheduler import FrameScheduler
+from tagurit.client.rolling_metrics import RollingReceiptMetrics, RollingSnapshot
 from tagurit.protocol import ImageFrame
 from tagurit.shared.image_codec import encode_video
 from tagurit.shared.image_protocol import (
@@ -53,6 +54,7 @@ class PendingTransmission:
     frame: ImageFrame
     message: ImageMessage | None = None
     wire: bytes | None = None
+    first_submitted_at: float | None = None
     submitted_at: float | None = None
     attempt: int | None = None
 
@@ -84,6 +86,7 @@ class GabrielTransport:
         - send_interval (float | None): Minimum seconds between encoded frame submissions
         - endpoint (str): Gabriel WebSocket URL
         - event_log (EventLog | None): Optional caller-owned CSV recorder
+        - metrics_window_seconds (float): Time horizon for recent receipt measurements
     """
 
     # Keep application state separate from each network connection
@@ -98,6 +101,7 @@ class GabrielTransport:
         send_interval: float | None = None,
         endpoint: str = GABRIEL_ENDPOINT,
         event_log: EventLog | None = None,
+        metrics_window_seconds: float = 10.0,
     ) -> None:
         validate_identity(session_id, 1)
         if send_interval is None:
@@ -107,6 +111,7 @@ class GabrielTransport:
         self._send_interval = send_interval
         self._endpoint = endpoint
         self._event_log = event_log
+        self._rolling_metrics = RollingReceiptMetrics(metrics_window_seconds, time.monotonic())
         if codec not in ("jpeg", "h264", "h265"):
             raise ValueError("Unsupported transport image codec")
         if type(video_crf) is not int or not 0 <= video_crf <= 51:
@@ -133,6 +138,14 @@ class GabrielTransport:
 
         # No connection is available until Gabriel finishes registration
         self._scheduler.set_connected(False)
+
+    def recent_metrics(self) -> RollingSnapshot:
+        """
+        Return recent validated receipt delay and acknowledged throughput.
+
+        Return: RollingSnapshot measured using the client's monotonic clock
+        """
+        return self._rolling_metrics.snapshot(time.monotonic())
 
     # Apply an optional simulation gate without overriding connection failures
     def set_link_allowed(self, available: bool) -> None:
@@ -187,6 +200,13 @@ class GabrielTransport:
             if self._link_allowed and pacing_ready:
                 # Replay retained entries in reservation order before selecting new work.
                 pending = next((p for p in self._pending.values() if p.attempt != attempt), None)
+                if (
+                    pending is not None
+                    and sum(p.attempt == attempt for p in self._pending.values())
+                    >= self._scheduler.window_size
+                ):
+                    await asyncio.sleep(LOOP_INTERVAL_SECONDS)
+                    continue
                 retrying = pending is not None and pending.wire is not None
                 if pending is None and self._accepting:
                     frame = self._scheduler.reserve_next_frame()
@@ -220,6 +240,8 @@ class GabrielTransport:
                     if attempt != self._active_attempt:
                         raise asyncio.CancelledError()
                     pending.submitted_at = time.monotonic()
+                    if pending.first_submitted_at is None:
+                        pending.first_submitted_at = pending.submitted_at
                     pending.attempt = attempt
                     self._last_submit = pending.submitted_at
                     self._record("submitted", pending, at=pending.submitted_at)
@@ -249,7 +271,13 @@ class GabrielTransport:
             if receipt.session_id != self._session_id:
                 raise ValueError("Receipt identifies a different application session")
             pending = self._pending.get(receipt.frame_id)
-            if pending is None or pending.message is None or pending.attempt != attempt:
+            if (
+                pending is None
+                or pending.message is None
+                or pending.attempt != attempt
+                or pending.submitted_at is None
+                or pending.first_submitted_at is None
+            ):
                 raise ValueError("Receipt arrived without an outstanding submission")
             frame = pending.frame
             expected = pending.message
@@ -272,7 +300,9 @@ class GabrielTransport:
                 raise ValueError("Receipt does not match the submitted image bytes")
 
             # Record only validated receipts, before discarding retained bytes.
-            self._record("ack", pending)
+            received_at = time.monotonic()
+            self._record("ack", pending, at=received_at)
+            self._rolling_metrics.record(pending.first_submitted_at, received_at)
 
             # Release retained work only after every receipt check passes
             previous_state = self._scheduler.state
@@ -280,7 +310,12 @@ class GabrielTransport:
             del self._pending[frame.frame_id]
             self.completed += 1
 
-            self._report("ACK", f"Frame {frame.frame_id} received and retained by server")
+            delay_ms = 1000 * (received_at - pending.first_submitted_at)
+            self._report(
+                "ACK",
+                f"Frame {frame.frame_id} received and retained by server | "
+                f"submit-to-receipt={delay_ms:.0f}ms",
+            )
 
             if previous_state != self._scheduler.state:
                 self._report("STATE", f"{previous_state.value} -> {self._scheduler.state.value}")

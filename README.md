@@ -78,14 +78,69 @@ On reconnect all unresolved frames are replayed before new work. Receipts may
 arrive out of order. Cached frames awaiting acknowledgment keep the scheduler
 in reintegration mode even when the waiting bank is empty.
 
+The client prints each frame's submit-to-receipt delay at its validated receipt.
+Every two seconds, `METRICS` prints the mean delay and acknowledged frames per
+second over the most recent ten seconds. At startup, the rate uses the shorter
+elapsed time; with no recent receipts, delay is `n/a` and the rate is zero.
+Change the periods with `--metrics-window` and `--metrics-interval`. The demo
+also writes raw per-frame events to a newly named CSV in `data/flow-control/`;
+pass `--events PATH` to choose its location. The CSV path is printed at startup.
+These measurements do not change the token allowance in fixed-window mode.
+
+## Adaptive client window
+
+Start the receiver with `--tokens 16`, then run a client with
+`--adaptive-window`. Adaptive mode starts at four in-flight frames by default
+and probes window sizes 1, 2, 4 and 8. Its client-side limit may change while
+the server credit limit remains fixed. Outstanding frames are retained when
+the limit shrinks; new submissions wait until enough receipts arrive.
+
+```sh
+uv run python -m tagurit.sim.run_client --adaptive-window
+```
+
+Every ten seconds, the controller checks recent validated receipt delay and
+acknowledged frames per second. It probes a larger window only when frames are
+waiting, and keeps the probe only when throughput improves by at least 3% and
+mean receipt delay stays at or below one second. Longer delays or a connection
+failure reduce the window. A failed probe waits 30 seconds before another
+growth attempt. These are initial heuristic settings, not a measured link
+bandwidth estimate. `WINDOW` lines and `window_change` CSV events show every
+change and its reason.
+
+For a finite run while manually changing a Network Link Conditioner profile,
+use a new output directory and allow enough time for all frames to drain. The
+receiver needs at least eight server tokens to exercise the full adaptive
+range:
+
+```sh
+uv run python scripts/benchmark_flow_control.py \
+  --adaptive-window --interactive-markers --initial-condition off \
+  --count 600 --arrival-interval 0.1 --timeout 600 \
+  --output data/flow-control/adaptive-live-1
+```
+
+After changing the NLC profile, return to the client terminal, type its name
+(`mild`, `medium`, `strong`, or `off`) and press Enter. The client prints recent
+receipt delay, acknowledged frames per second, current window, and any window
+change. The profile markers and window changes share timestamps in
+`client-events.csv`; `live-console.log` saves the readable terminal lines.
+Markers represent the time Enter was pressed, which may be a few seconds after
+the actual NLC switch. Other per-frame events remain in the CSV even though
+the interactive console filters them out.
+
+The benchmark records the chosen initial window and adaptive mode in
+`config.json`. The same command without `--adaptive-window` remains a fixed
+window benchmark.
+
 ## One-token flow-control baseline
 
-Timing collection is opt-in and reusable. The regular demo uses its configured
+The regular demo records timing events. It uses its configured
 send interval; the finite benchmark defaults to **zero artificial send delay**.
 The regular client and cloudlet now default to two outstanding frames with no
 artificial send delay. The benchmark defaults to `--window 1` to preserve the
 one-token baseline; pass `--window 2` or `--window 4` for larger fixed windows.
-An adaptive controller is not implemented yet.
+Adaptive mode is optional; these baseline commands remain fixed-window runs.
 
 Start the cloudlet in terminal 1 (choose a new event filename for each run):
 
@@ -128,6 +183,7 @@ Metric definitions:
 | `encode_ms` | Completed encoding attempts, including JPEG decode and FFmpeg startup |
 | `arrival_to_submit_ms` | Client arrival to first encoded-payload handoff to Gabriel |
 | `send_to_receipt_ms` | Last handoff to validated receipt; includes Gabriel scheduling, network and server decoding |
+| `first_submit_to_receipt_ms` | First handoff to validated receipt, including retry and reconnect time |
 | `arrival_to_receipt_ms` | Total time from client arrival until validated acknowledgment |
 | `attempts` | Number of submissions, including retries |
 
@@ -151,3 +207,34 @@ For the two-token benchmark, start the receiver with `--tokens 2`, and add
 `max_submitted_frames` in the summary reports the observed peak number of
 submitted images awaiting a receipt; it can be smaller than the configured
 window when encoding or input arrival is slower than server responses.
+
+## Compare fixed client windows
+
+For a normal-network comparison, turn Network Link Conditioner off. Run the
+receiver on the cloudlet with `--tokens 16`, then keep an SSH tunnel open on the
+laptop so local port 9099 forwards to the cloudlet receiver:
+
+```sh
+ssh -N -L 9099:127.0.0.1:9099 ubuntu@cloudlet029.elijah.cs.cmu.edu
+```
+
+In another laptop terminal, run the sweep. Confirm that port 9099 belongs to
+the SSH tunnel rather than a local receiver:
+
+```sh
+uv run python scripts/benchmark_window_sweep.py \
+  --condition "normal (conditioner off)" \
+  --output data/flow-control/normal-trial-1
+```
+
+The sweep uses the same 100 JPEGs at 10 arrivals per second for client windows
+1, 2, 4, 8 and 16. It prints a comparison table and saves
+`window-results.csv` for a spreadsheet. Each `window-N/` folder preserves
+the raw client events, per-frame rows, input hashes, configuration and summary;
+`window-N-console.log` preserves terminal output. The mean delay is calculated
+from acknowledged per-frame first-submit-to-receipt measurements. The frame
+rate comes from the benchmark's full arrival-to-last-receipt duration. Retries
+and incomplete runs are marked in the comparison table. Use a fresh output
+directory and a matching condition label for each Network Link Conditioner
+profile. Keep the profile fixed during each sweep, and leave server tokens at
+least as high as the largest client window.

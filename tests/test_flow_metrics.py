@@ -3,9 +3,11 @@ Check timing boundaries, retries and incomplete observations without a network.
 """
 
 import asyncio
+import csv
 from types import SimpleNamespace
 
 import pytest
+from scripts.benchmark_flow_control import record_condition
 
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.gabriel_transport import GabrielTransport
@@ -65,6 +67,10 @@ def test_timing_excludes_encoding_and_preserves_retry(tmp_path, monkeypatch, ret
     transport._receive_result(
         SimpleNamespace(string_result=encode_receipt(receipt)), 2 if retry else 1
     )
+    recent = transport.recent_metrics()
+    assert recent.acknowledged == 1
+    assert recent.mean_submit_to_receipt_ms == (11000 if retry else 3000)
+    assert recent.acknowledged_fps == pytest.approx(0.1)
     log.close()
     rows, summary = summarize_events(path)
     assert rows[0]["queue_ms"] == 10000
@@ -91,6 +97,24 @@ def test_incomplete_run_is_not_reported_as_success(tmp_path):
     assert summary["max_waiting_frames"] == 1
     with pytest.raises(FileExistsError):
         EventLog(path)
+
+
+def test_network_condition_marker_shares_client_timeline(tmp_path, monkeypatch):
+    """An operator marker has a client timestamp and is not counted as a frame."""
+    path = tmp_path / "events.csv"
+    log = EventLog(path)
+    monkeypatch.setattr("scripts.benchmark_flow_control.time.monotonic", lambda: 15.0)
+    assert record_condition(log, " strong\n", 10.0) == "CONDITION | +   5.0s | strong"
+    log.record("arrive", SESSION, 1, at=16.0, jpeg_bytes=100)
+    log.close()
+    with path.open(newline="") as stream:
+        events = list(csv.DictReader(stream))
+    assert events[0]["event"] == "network_condition"
+    assert events[0]["network_condition"] == "strong"
+    assert float(events[0]["monotonic_s"]) == 15.0
+    rows, summary = summarize_events(path)
+    assert len(rows) == 1
+    assert summary["arrived"] == 1
 
 
 @pytest.mark.parametrize("interval", [-1, float("nan"), float("inf")])

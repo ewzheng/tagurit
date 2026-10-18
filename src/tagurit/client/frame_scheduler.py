@@ -92,11 +92,27 @@ class FrameScheduler:
     @property
     def window_size(self) -> int:
         """
-        Return the configured maximum number of reserved frames.
+        Return the current maximum number of reserved frames.
 
         Return: Positive in-flight window size
         """
         return self._window_size
+
+    def set_window_size(self, window_size: int) -> None:
+        """
+        Change the reservation limit without releasing outstanding frames.
+
+        If the new limit is below the current in-flight count, new reservations
+        wait until enough matching receipts release those frames.
+
+        Parameters:
+            - window_size (int): New positive reservation limit
+
+        Return: void
+        """
+        if type(window_size) is not int or window_size < 1:
+            raise ValueError("Window size must be a positive integer")
+        self._window_size = window_size
 
     # Return the current mode
     @property

@@ -88,6 +88,31 @@ def test_reconnect_replays_all_unresolved_before_new_work():
     asyncio.run(run())
 
 
+def test_reconnect_respects_a_shrunken_client_window():
+    """Retained frames remain safe while only two resends may be active."""
+
+    async def run():
+        scheduler, transport, receiver = make_transport(window=4)
+        for _ in range(4):
+            await transport._produce(1)
+        transport._active_attempt = 2
+        scheduler.set_window_size(2)
+
+        first = await transport._produce(2)
+        await transport._produce(2)
+        blocked = asyncio.create_task(transport._produce(2))
+        await asyncio.sleep(0)
+        assert not blocked.done()
+        assert scheduler.inflight_count() == 4
+
+        acknowledge(transport, receiver, first, attempt=2)
+        third = await asyncio.wait_for(blocked, 1)
+        assert decode_image(third.byte_payload).frame_id == 3
+        assert scheduler.window_size == 2
+
+    asyncio.run(run())
+
+
 def test_bad_or_duplicate_receipt_never_releases_another_slot():
     """Invalid receipts stop production; a duplicate cannot release frame 2."""
 

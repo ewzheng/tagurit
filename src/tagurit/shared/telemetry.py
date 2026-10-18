@@ -24,6 +24,9 @@ FIELDS = (
     "wire_bytes",
     "attempt",
     "submitted_count",
+    "window_size",
+    "window_reason",
+    "network_condition",
 )
 
 

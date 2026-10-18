@@ -7,14 +7,20 @@ Communication uses the actual Gabriel connection
 
 import argparse
 import asyncio
+import math
 import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
+from tagurit.client.adaptive_window import INITIAL_WINDOW, WINDOW_LEVELS
 from tagurit.client.config import INFLIGHT_WINDOW, SEND_INTERVAL_SECONDS
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.protocol import ImageFrame
+from tagurit.shared.telemetry import EventLog
 from tagurit.sim.config import FRAME_INTERVAL_SECONDS, QUEUE_DISPLAY_LIMIT
 from tagurit.sim.image_feeder import feed_images
 
@@ -81,10 +87,26 @@ async def main() -> None:
         void
     """
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--window", type=int, default=INFLIGHT_WINDOW)
+    parser.add_argument("--window", type=int)
+    parser.add_argument("--adaptive-window", action="store_true")
     parser.add_argument("--send-interval", type=float, default=SEND_INTERVAL_SECONDS)
+    parser.add_argument("--metrics-window", type=float, default=10.0)
+    parser.add_argument("--metrics-interval", type=float, default=2.0)
+    parser.add_argument("--events", type=Path, help="Client per-frame CSV path")
     args = parser.parse_args()
+    if args.window is None:
+        args.window = INITIAL_WINDOW if args.adaptive_window else INFLIGHT_WINDOW
+    if args.adaptive_window and args.window not in WINDOW_LEVELS:
+        parser.error("adaptive window must be one of 1, 2, 4, or 8")
+    for name in ("metrics_window", "metrics_interval"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value <= 0:
+            parser.error(f"{name.replace('_', '-')} must be finite and positive")
     start_time = time.monotonic()
+    event_path = args.events or Path("data/flow-control") / (
+        f"client-events-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{uuid4().hex[:8]}.csv"
+    )
+    event_log = EventLog(event_path)
 
     # Print events with elapsed time and current queue sizes
     def report(event: str, detail: str, scheduler: FrameScheduler) -> None:
@@ -99,14 +121,27 @@ async def main() -> None:
         )
 
     print("Local image demo with real Gabriel communication", flush=True)
+    print(
+        f"Window mode: {'adaptive' if args.adaptive_window else 'fixed'} | initial={args.window}",
+        flush=True,
+    )
+    print(f"Client events: {event_path}", flush=True)
     print("Press Ctrl+C to stop | Queued frames are not drained on exit", flush=True)
 
     try:
         await run_client(
-            repeat_frames(), report, window_size=args.window, send_interval=args.send_interval
+            repeat_frames(),
+            report,
+            window_size=args.window,
+            adaptive_window=args.adaptive_window,
+            send_interval=args.send_interval,
+            event_log=event_log,
+            metrics_window_seconds=args.metrics_window,
+            metrics_report_interval_seconds=args.metrics_interval,
         )
 
     finally:
+        event_log.close()
         print("Queues and in-flight data are memory-only and are lost on exit", flush=True)
 
 
