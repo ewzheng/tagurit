@@ -108,6 +108,24 @@ growth attempt. These are initial heuristic settings, not a measured link
 bandwidth estimate. `WINDOW` lines and `window_change` CSV events show every
 change and its reason.
 
+The scored-image pipeline can use the same controller. With a fitted model
+bundle, local dataset images, a receiver with at least eight tokens, and the
+SSH tunnel running, start it from the repository root:
+
+```sh
+uv run --extra model python -m tagurit.sim.run_pipeline BUNDLE_PATH \
+  --dataset visdrone --sequences val/uav0000086_00000_v \
+  --all-frames --limit 20 --interval 0.5 --no-view \
+  --adaptive-window --events data/flow-control/pipeline-client-events.csv
+```
+
+Replace `BUNDLE_PATH` with the directory containing `tagger.json`. The model
+scores every replayed image before it enters the client. `WINDOW` lines show
+client-limit changes, and the event CSV preserves receipt and window events.
+Use a new `--events` filename for each run. A short 20-frame run checks the
+handoff and delivery; a longer run with waiting frames is needed to exercise
+window changes.
+
 For a finite run while manually changing a Network Link Conditioner profile,
 use a new output directory and allow enough time for all frames to drain. The
 receiver needs at least eight server tokens to exercise the full adaptive

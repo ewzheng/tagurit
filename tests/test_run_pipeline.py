@@ -90,7 +90,9 @@ def test_recorder_keeps_priority_thumbnail_and_best_tile() -> None:
 def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     cancelled = []
 
-    async def endless_pipeline(images: object, tagger: object, report: object) -> None:
+    async def endless_pipeline(
+        images: object, tagger: object, report: object, **_kwargs: object
+    ) -> None:
         try:
             await asyncio.Event().wait()
         except asyncio.CancelledError:
@@ -106,3 +108,36 @@ def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.M
     with pytest.raises(RuntimeError, match="no display"):
         asyncio.run(run_pipeline.run_demo([], 0.0, recorder, {}, False, BrokenVideo()))  # type: ignore[arg-type]
     assert cancelled == [True]
+
+
+@pytest.mark.usefixtures("dataset")
+def test_cli_passes_adaptive_mode_and_event_log(tmp_path, monkeypatch) -> None:
+    """The end-to-end entry point enables adaptive mode and owns its CSV log."""
+    options = []
+    event_path = tmp_path / "client-events.csv"
+
+    async def fake_run_demo(*_args, **kwargs):
+        options.append(kwargs)
+        kwargs["event_log"].record("window_change", "test", window_size=4)
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+
+    monkeypatch.setattr(run_pipeline, "load_bundle", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(run_pipeline, "run_demo", fake_run_demo)
+    run_pipeline.main(
+        [
+            str(tmp_path / "bundle"),
+            "--dataset",
+            DATASET,
+            "--sequences",
+            "a",
+            "--all-frames",
+            "--limit",
+            "1",
+            "--no-view",
+            "--adaptive-window",
+            "--events",
+            str(event_path),
+        ]
+    )
+    assert options[0]["adaptive_window"] is True
+    assert "window_change" in event_path.read_text()

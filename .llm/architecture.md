@@ -49,6 +49,8 @@ draws a live dashboard of the latest frame, the bank in send order and the
 frames sent, optionally recorded to MP4. The orchestrator takes
 images from any source and never imports `sim/`, so a camera source plugs in
 the same way.
+The pipeline accepts `--adaptive-window` and `--events` so scored frames use
+the same optional client controller and event log as the queueing demo.
 
 ## Tagging
 

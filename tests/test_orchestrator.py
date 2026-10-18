@@ -78,15 +78,22 @@ def test_tagger_errors_propagate() -> None:
 def test_run_hands_tagged_frames_to_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[ImageFrame] = []
     reports: list[object] = []
+    options: list[dict[str, object]] = []
 
-    async def fake_run_client(frames: AsyncIterable[ImageFrame], report: object) -> None:
+    async def fake_run_client(
+        frames: AsyncIterable[ImageFrame], report: object, **kwargs: object
+    ) -> None:
         received.extend([frame async for frame in frames])
         reports.append(report)
+        options.append(kwargs)
 
     def report(event: str, detail: str, scheduler: object) -> None:
         pass
 
     monkeypatch.setattr(orchestrator, "run_client", fake_run_client)
-    asyncio.run(orchestrator.run(images([b"aa", b"b"]), LengthTagger(), report))
+    asyncio.run(
+        orchestrator.run(images([b"aa", b"b"]), LengthTagger(), report, adaptive_window=True)
+    )
     assert [(f.frame_id, f.priority) for f in received] == [(1, 0.2), (2, 0.1)]
     assert reports == [report]
+    assert options == [{"adaptive_window": True, "event_log": None}]

@@ -19,6 +19,7 @@ from typing import Protocol
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.protocol import ImageFrame
+from tagurit.shared.telemetry import EventLog
 
 
 class FrameTagger(Protocol):
@@ -72,6 +73,9 @@ async def run(
     images: AsyncIterable[bytes],
     tagger: FrameTagger,
     report: Callable[[str, str, FrameScheduler], None],
+    *,
+    adaptive_window: bool = False,
+    event_log: EventLog | None = None,
 ) -> None:
     """
     Tag images and run the client on them until the images end and every frame is acknowledged.
@@ -83,7 +87,14 @@ async def run(
         - images (AsyncIterable[bytes]): encoded images in capture order
         - tagger (FrameTagger): scores each image
         - report (Callable): receives each client event, its detail, and the scheduler
+        - adaptive_window (bool): Adjust in-flight capacity from receipt feedback
+        - event_log (EventLog | None): Optional caller-owned client event log
 
     Return: void
     """
-    await run_client(tag_frames(images, tagger), report)
+    await run_client(
+        tag_frames(images, tagger),
+        report,
+        adaptive_window=adaptive_window,
+        event_log=event_log,
+    )
