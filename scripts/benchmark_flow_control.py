@@ -192,8 +192,8 @@ def main() -> None:
             emit("After each NLC switch, type its profile name and press Enter.")
             loop.add_reader(sys.stdin.fileno(), read_condition)
         try:
-            async with asyncio.timeout(args.timeout):
-                await run_client(
+            await asyncio.wait_for(
+                run_client(
                     source(),
                     report,
                     window_size=args.window,
@@ -201,7 +201,9 @@ def main() -> None:
                     send_interval=args.send_interval,
                     endpoint=args.endpoint,
                     event_log=log,
-                )
+                ),
+                args.timeout,
+            )
         finally:
             if args.interactive_markers:
                 loop.remove_reader(sys.stdin.fileno())

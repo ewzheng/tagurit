@@ -152,7 +152,8 @@ communication eventually allows the retained work to be delivered.
   Hugging Face `transformers` (optional `model` extra). New models load through
   `transformers` rather than model-specific packages
 - Middleware: Gabriel client and server using WebSockets over TCP
-- Python: 3.12+, with dependencies managed by uv
+- Python: 3.10+, with dependencies managed by uv. The Jetson runs 3.10,
+  the only Python with CUDA PyTorch on JetPack 6
 
 ## Timing experiments
 
@@ -214,8 +215,10 @@ are initial heuristics rather than a physical bandwidth estimate.
   lighting or camera altitude raises every score until the bank is refitted
 - The sparse streams are synthetic: crops are smaller than real frames, empty
   crops may hold unannotated targets, and they share scenes with the fit data
-- On the Jetson's JetPack 6 the only Python 3.12 CUDA PyTorch build is torch
-  2.8 from the Jetson AI Lab `jp6/cu129` index; it is untested on the device
+- The Jetson's JetPack 6 has CUDA PyTorch only for Python 3.10, so the
+  Jetson and the laptop run different torch releases. The Jetson AI Lab's
+  Python 3.12 build needs glibc 2.38 (Ubuntu 22.04 has 2.35), and PyPI's
+  aarch64 wheels need a newer CUDA driver and fall back to the CPU
 
 ## Deferred
 

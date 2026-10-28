@@ -12,6 +12,9 @@ backlog drains alongside the live stream.
 uv sync
 make test
 ```
+
+On the Jetson (JetPack 6), `make sync-jetson` installs Python 3.10 with the
+`model` extra and CUDA PyTorch built for the device.
 ## Layout
 
 - `src/tagurit/`

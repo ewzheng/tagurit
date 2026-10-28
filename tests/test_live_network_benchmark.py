@@ -21,9 +21,12 @@ def test_typed_profile_is_recorded_during_run(tmp_path, monkeypatch):
     async def fake_run_client(_source, _report, **_kwargs):
         os.write(master_fd, b"strong\n")
         marker = output / "client-events.csv"
-        async with asyncio.timeout(1):
+
+        async def marker_written():
             while "strong" not in marker.read_text():
                 await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(marker_written(), 1)
 
     with os.fdopen(slave_fd, "r", encoding="utf-8") as terminal:
         try:

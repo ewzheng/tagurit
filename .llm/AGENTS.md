@@ -56,6 +56,8 @@ Fallback tiers, in order. Finish one before starting the next.
 - `make sync` — install dependencies into `.venv` using `uv sync`
 - `make sync-model` — also install the `model` extra (anomalib, torch);
   a plain `make sync` afterwards removes it again
+- `make sync-jetson` — on the Jetson: Python 3.10 with the model extra and
+  JetPack 6 CUDA torch
 - `make test` — `uv run pytest`
 - `make lint` — check lint rules and formatting
 - `make fmt` — `uv run ruff format .`
@@ -79,7 +81,9 @@ These files are local and are not included in a fresh clone.
 
 ## Conventions
 
-- Python 3.12+, managed by `uv`. Add dependencies with `uv add`.
+- Python 3.10+, managed by `uv`. Add dependencies with `uv add`. The Jetson
+  runs 3.10, so avoid newer language features and standard library APIs
+  such as `asyncio.timeout` or `datetime.UTC`.
 - One module, one responsibility. Each package's `__init__.py` docstring states it.
 - `protocol.py` defines the perception-to-client handoff. Keep Gabriel messages,
   receipts and wire encoding out of it.

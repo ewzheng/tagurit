@@ -4,20 +4,26 @@ version = "0.1.0"
 description = "Tag and cache what matters on a disconnected edge device, then sync to a cloudlet when the link returns."
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.12"
+# 3.10 is the only Python with CUDA PyTorch on the Jetson's JetPack 6; newer
+# releases of numpy and websockets have dropped it.
+requires-python = ">=3.10"
 dependencies = [
     "gabriel-client==5.2.0",
     "gabriel-protocol==5.1",
     "gabriel-server==5.2.0",
     "imageio-ffmpeg>=0.6.0",
-    "numpy>=2.5.3",
+    "numpy>=2.5.3; python_version >= '3.12'",
+    "numpy>=2.2; python_version < '3.12'",
     "opencv-python>=5.0.0.93",
-    "websockets>=17.1",
+    "websockets>=17.1; python_version >= '3.12'",
+    "websockets>=15; python_version < '3.12'",
 ]
 
 [project.optional-dependencies]
 model = [
     "anomalib>=2.6.2",
+    # The Jetson's torch links cuDSS but does not ship it; `make sync-jetson` links it in.
+    "nvidia-cudss-cu12==0.8.0.10; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.11'",
     "torch>=2.8",
     "torchvision>=0.23",
     "transformers>=5.18.0",
@@ -44,3 +50,23 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.uv]
+# cuDSS only has to load for torch. Its cuda-toolkit dependency would install a
+# server cuBLAS that shadows JetPack's and fails on the Orin GPU.
+dependency-metadata = [{ name = "nvidia-cudss-cu12", version = "0.8.0.10", requires-dist = [] }]
+
+# Jetson builds of torch for JetPack 6 (Ubuntu 22.04, CUDA 12.6), on Python 3.10 only.
+# PyPI's aarch64 wheels need a newer CUDA driver, and the cp312 Jetson build a newer glibc.
+[[tool.uv.index]]
+name = "jetson-jp6"
+url = "https://pypi.jetson-ai-lab.io/jp6/cu126/+simple"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "jetson-jp6", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.11'" },
+]
+torchvision = [
+    { index = "jetson-jp6", marker = "sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.11'" },
+]
