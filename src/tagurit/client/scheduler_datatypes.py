@@ -48,9 +48,23 @@ class PriorityBankEntry:
     """
 
     sort_priority: float = field(init=False)  # Negative score for heap ordering
-    arrival_order: int                        # Original scheduler arrival order
+    arrival_order: int  # Original scheduler arrival order
     frame: ImageFrame = field(compare=False)  # Image held by this entry
 
     # Set the heap sorting value while creating this frozen entry
     def __post_init__(self) -> None:
         object.__setattr__(self, "sort_priority", -self.frame.priority)
+
+
+@dataclass(frozen=True)
+class InflightEntry:
+    """
+    Retain a selected frame and its queue origin until its matching receipt.
+
+    Parameters:
+        - frame (ImageFrame): Image reserved by the scheduler
+        - from_bank (bool): Whether this image counts as stored work
+    """
+
+    frame: ImageFrame
+    from_bank: bool

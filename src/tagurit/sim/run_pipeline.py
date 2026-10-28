@@ -22,6 +22,8 @@ priority, the bank in send order, and the frames sent most recently.
 window off for headless runs. Press q or Esc in the window to stop. Cut the
 network to watch tagged frames bank up; restore it to watch the bank drain
 highest priority first. Needs the ``model`` extra and a running receiver.
+``--adaptive-window`` enables receipt-based client flow control, and
+``--events PATH`` saves client events to a new CSV file.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from tagurit import orchestrator
 from tagurit.client.config import GABRIEL_ENDPOINT
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.protocol import ImageFrame
+from tagurit.shared.telemetry import EventLog
 from tagurit.sim import dataloader
 from tagurit.sim.config import FRAME_INTERVAL_SECONDS
 from tagurit.sim.pipeline_view import (
@@ -267,6 +270,9 @@ async def run_demo(
     targets: dict[int, bool | None],
     window: bool,
     video: cv2.VideoWriter | None,
+    *,
+    adaptive_window: bool = False,
+    event_log: EventLog | None = None,
 ) -> np.ndarray:
     """
     Run the pipeline with the console, and the dashboard when asked for.
@@ -282,6 +288,8 @@ async def run_demo(
         - targets (dict[int, bool | None]): frame ID to ground truth
         - window (bool): show a window
         - video (cv2.VideoWriter | None): write the dashboard here as well
+        - adaptive_window (bool): Adjust client in-flight capacity from receipts
+        - event_log (EventLog | None): Optional caller-owned client event log
 
     Return: the final dashboard image
     """
@@ -289,7 +297,15 @@ async def run_demo(
     tracker = Tracker()
     quit_requested = asyncio.Event()
     report = console(recorder.priorities, targets, tracker, start)
-    pipeline = asyncio.create_task(orchestrator.run(replay(frames, interval), recorder, report))
+    pipeline = asyncio.create_task(
+        orchestrator.run(
+            replay(frames, interval),
+            recorder,
+            report,
+            adaptive_window=adaptive_window,
+            event_log=event_log,
+        )
+    )
     drawer = None
     if window or video is not None:
         drawer = asyncio.create_task(
@@ -335,6 +351,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--interval", type=float, default=FRAME_INTERVAL_SECONDS)
     parser.add_argument("--limit", type=int, help="replay at most this many frames")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
+    parser.add_argument("--adaptive-window", action="store_true")
+    parser.add_argument("--events", type=Path, help="write client events to a new CSV file")
     parser.add_argument(
         "--view", action=argparse.BooleanOptionalAction, default=True, help="show the window"
     )
@@ -378,12 +396,27 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"could not open {args.video} for writing")
 
     recorder = Recorder(tagger, targets)
+    event_log = None
     try:
-        final = asyncio.run(run_demo(frames, args.interval, recorder, targets, args.view, video))
+        event_log = EventLog(args.events) if args.events is not None else None
+        final = asyncio.run(
+            run_demo(
+                frames,
+                args.interval,
+                recorder,
+                targets,
+                args.view,
+                video,
+                adaptive_window=args.adaptive_window,
+                event_log=event_log,
+            )
+        )
     except KeyboardInterrupt:
         print("\nPipeline stopped")
         return
     finally:
+        if event_log is not None:
+            event_log.close()
         if video is not None:
             video.release()
             print(f"Wrote {args.video}", flush=True)
