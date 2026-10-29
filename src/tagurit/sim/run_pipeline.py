@@ -44,6 +44,7 @@ import numpy as np
 
 from tagurit import orchestrator
 from tagurit.client.config import GABRIEL_ENDPOINT
+from tagurit.client.encoder_selection import ENCODER_MODES
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.protocol import ImageFrame
 from tagurit.shared.telemetry import EventLog
@@ -272,6 +273,7 @@ async def run_demo(
     video: cv2.VideoWriter | None,
     *,
     adaptive_window: bool = False,
+    encoder: str = "auto",
     event_log: EventLog | None = None,
 ) -> np.ndarray:
     """
@@ -289,6 +291,7 @@ async def run_demo(
         - window (bool): show a window
         - video (cv2.VideoWriter | None): write the dashboard here as well
         - adaptive_window (bool): Adjust client in-flight capacity from receipts
+        - encoder (str): auto, software, or hardware H.264 encoding backend
         - event_log (EventLog | None): Optional caller-owned client event log
 
     Return: the final dashboard image
@@ -303,6 +306,7 @@ async def run_demo(
             recorder,
             report,
             adaptive_window=adaptive_window,
+            encoder=encoder,
             event_log=event_log,
         )
     )
@@ -352,6 +356,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--limit", type=int, help="replay at most this many frames")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument("--adaptive-window", action="store_true")
+    parser.add_argument("--encoder", choices=ENCODER_MODES, default="auto")
     parser.add_argument("--events", type=Path, help="write client events to a new CSV file")
     parser.add_argument(
         "--view", action=argparse.BooleanOptionalAction, default=True, help="show the window"
@@ -408,6 +413,7 @@ def main(argv: list[str] | None = None) -> None:
                 args.view,
                 video,
                 adaptive_window=args.adaptive_window,
+                encoder=args.encoder,
                 event_log=event_log,
             )
         )

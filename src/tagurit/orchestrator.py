@@ -75,6 +75,7 @@ async def run(
     report: Callable[[str, str, FrameScheduler], None],
     *,
     adaptive_window: bool = False,
+    encoder: str = "auto",
     event_log: EventLog | None = None,
 ) -> None:
     """
@@ -88,6 +89,7 @@ async def run(
         - tagger (FrameTagger): scores each image
         - report (Callable): receives each client event, its detail, and the scheduler
         - adaptive_window (bool): Adjust in-flight capacity from receipt feedback
+        - encoder (str): auto, software, or hardware H.264 encoding backend
         - event_log (EventLog | None): Optional caller-owned client event log
 
     Return: void
@@ -96,5 +98,6 @@ async def run(
         tag_frames(images, tagger),
         report,
         adaptive_window=adaptive_window,
+        encoder=encoder,
         event_log=event_log,
     )

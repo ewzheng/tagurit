@@ -64,6 +64,7 @@ def test_adaptive_run_probes_and_records_window_changes(monkeypatch, tmp_path):
                     (event, detail, scheduler.window_size)
                 ),
                 adaptive_window=True,
+                encoder="software",
                 event_log=log,
                 metrics_window_seconds=0.05,
                 metrics_report_interval_seconds=0.01,
