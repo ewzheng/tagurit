@@ -51,7 +51,7 @@ def test_timing_excludes_encoding_and_preserves_retry(tmp_path, monkeypatch, ret
         now[0] = 22
         return b"encoded", 16, 16
 
-    monkeypatch.setattr("tagurit.client.gabriel_transport.encode_video", encode)
+    monkeypatch.setattr("tagurit.client.encoder_selection.encode_video", encode)
     first = asyncio.run(transport._produce(1))
     assert transport._pending[1].submitted_at == 22
     if retry:

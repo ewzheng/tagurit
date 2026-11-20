@@ -29,10 +29,10 @@ from tagurit.client.config import (
     SEND_INTERVAL_SECONDS,
     VIDEO_CRF,
 )
+from tagurit.client.encoder_selection import SelectedEncoder
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.rolling_metrics import RollingReceiptMetrics, RollingSnapshot
 from tagurit.protocol import ImageFrame
-from tagurit.shared.image_codec import encode_video
 from tagurit.shared.image_protocol import (
     ImageMessage,
     decode_receipt,
@@ -83,6 +83,7 @@ class GabrielTransport:
         - report (Callable[[str, str], None]): Callback receiving event and detail
         - codec (str): Image wire codec
         - video_crf (int): Software encoder quality setting
+        - video_encoder (SelectedEncoder | None): Startup-selected video backend
         - send_interval (float | None): Minimum seconds between encoded frame submissions
         - endpoint (str): Gabriel WebSocket URL
         - event_log (EventLog | None): Optional caller-owned CSV recorder
@@ -98,6 +99,7 @@ class GabrielTransport:
         codec: str = IMAGE_CODEC,
         video_crf: int = VIDEO_CRF,
         *,
+        video_encoder: SelectedEncoder | None = None,
         send_interval: float | None = None,
         endpoint: str = GABRIEL_ENDPOINT,
         event_log: EventLog | None = None,
@@ -116,12 +118,15 @@ class GabrielTransport:
             raise ValueError("Unsupported transport image codec")
         if type(video_crf) is not int or not 0 <= video_crf <= 51:
             raise ValueError("Video CRF must be an integer from 0 to 51")
+        if video_encoder is not None and video_encoder.codec != codec:
+            raise ValueError("Selected encoder codec differs from the wire codec")
 
         self._scheduler = scheduler
         self._session_id = session_id
         self._report = report
         self._codec = codec
         self._video_crf = video_crf
+        self._video_encoder = video_encoder or SelectedEncoder("software", codec, video_crf)
         self._accepting = True
         self._link_allowed = True
         self._ready = False
@@ -220,7 +225,7 @@ class GabrielTransport:
                         self._record("encode_start", pending)
                         if self._codec in ("h264", "h265"):
                             encoded, width, height = await asyncio.to_thread(
-                                encode_video, frame.image_bytes, self._codec, self._video_crf
+                                self._video_encoder.encode, frame.image_bytes
                             )
                             pending.message = make_image_message(
                                 self._session_id,

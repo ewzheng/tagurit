@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from tagurit.client.adaptive_window import INITIAL_WINDOW, WINDOW_LEVELS
 from tagurit.client.config import INFLIGHT_WINDOW, SEND_INTERVAL_SECONDS
+from tagurit.client.encoder_selection import ENCODER_MODES
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.protocol import ImageFrame
@@ -89,6 +90,7 @@ async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--window", type=int)
     parser.add_argument("--adaptive-window", action="store_true")
+    parser.add_argument("--encoder", choices=ENCODER_MODES, default="auto")
     parser.add_argument("--send-interval", type=float, default=SEND_INTERVAL_SECONDS)
     parser.add_argument("--metrics-window", type=float, default=10.0)
     parser.add_argument("--metrics-interval", type=float, default=2.0)
@@ -134,6 +136,7 @@ async def main() -> None:
             report,
             window_size=args.window,
             adaptive_window=args.adaptive_window,
+            encoder=args.encoder,
             send_interval=args.send_interval,
             event_log=event_log,
             metrics_window_seconds=args.metrics_window,

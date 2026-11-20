@@ -33,6 +33,8 @@ Downstream decides whether to keep it, when to send it, and how.
 | `client/scheduler_datatypes.py` | Operating states and internal priority bank entries |
 | `client/rolling_metrics.py` | Recent validated receipt delay and acknowledged frame rate |
 | `client/gabriel_transport.py` | One Gabriel image producer, receipt matching, timeouts, retries and communication-health reporting |
+| `client/encoder_selection.py` | Startup selection of Jetson H.264 hardware or portable software encoding |
+| `client/jetson_h264.py` | Persistent Jetson GStreamer V4L2 H.264 encoder of independent images at QP 29 |
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
@@ -124,8 +126,11 @@ is zero.
 
 Each transmission includes a session UUID, frame ID and image hash.
 The client releases a frame only after receiving a matching receipt.
-The current default transcodes each JPEG to one independent H.264 frame at
-CRF 32. The wire header identifies its codec and original dimensions. The
+The default selects a hardware H.264 encoder at QP 29 after a successful
+startup encode/decode probe, or falls back to software H.264 at CRF 32.
+`--encoder software` forces the portable encoder and `--encoder hardware`
+requires the Jetson backend. Each JPEG becomes an independent H.264 frame.
+The wire header identifies its codec and original dimensions. The
 encoded bytes are retained unchanged across retries, and the cloudlet decodes
 them before returning a receipt.
 
@@ -207,6 +212,8 @@ are initial heuristics rather than a physical bandwidth estimate.
 - Stopping either application loses its in-memory records
 - The repeating demo stops immediately on Ctrl+C and may leave queued frames
 - The receiver accepts images but does not yet run a heavy model
+- Jetson hardware encoding rebuilds its GStreamer pipeline on image resolution
+  changes; mixed-resolution streams pay this startup cost repeatedly
 - The orchestrator tags one image at a time; a source faster than tagging is
   slowed down rather than dropping stale frames as a live camera should
 - The priority reference is calibrated on tiles, while frames take the
@@ -223,7 +230,7 @@ are initial heuristics rather than a physical bandwidth estimate.
 ## Deferred
 
 - Real camera input as an orchestrator image source
-- Jetson hardware encoding and adaptive codec or quality selection
+- Adaptive codec or quality selection
 - Embedding transmission
 - Live learning on the cloudlet
 - Bandwidth-aware scheduling and transmission
