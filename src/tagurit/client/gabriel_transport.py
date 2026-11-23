@@ -6,6 +6,7 @@ Only a matching receipt releases the scheduler's in-flight frame
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Callable
 from typing import Any
@@ -61,6 +62,7 @@ class GabrielTransport:
         - scheduler (FrameScheduler): Owner of waiting and unresolved frames
         - session_id (str): Stable UUID for this client run
         - report (Callable[[str, str], None]): Callback receiving event and detail
+        - send_interval (float): Minimum seconds between image submissions
     """
 
     # Keep application state separate from each network connection
@@ -71,18 +73,24 @@ class GabrielTransport:
         report: Callable[[str, str], None],
         codec: str = IMAGE_CODEC,
         video_crf: int = VIDEO_CRF,
+        send_interval: float = SEND_INTERVAL_SECONDS,
     ) -> None:
         validate_identity(session_id, 1)
         if codec not in ("jpeg", "h264", "h265"):
             raise ValueError("Unsupported transport image codec")
         if type(video_crf) is not int or not 0 <= video_crf <= 51:
             raise ValueError("Video CRF must be an integer from 0 to 51")
+        if isinstance(send_interval, bool) or not isinstance(send_interval, (int, float)):
+            raise ValueError("Send interval must be a non-negative finite number")
+        if not math.isfinite(send_interval) or send_interval < 0:
+            raise ValueError("Send interval must be a non-negative finite number")
 
         self._scheduler = scheduler
         self._session_id = session_id
         self._report = report
         self._codec = codec
         self._video_crf = video_crf
+        self._send_interval = send_interval
         self._accepting = True
         self._link_allowed = True
         self._ready = False
@@ -156,7 +164,7 @@ class GabrielTransport:
             now = time.monotonic()
 
             # Wait for availability, pacing and any outstanding receipt
-            pacing_ready = now - self._last_submit >= SEND_INTERVAL_SECONDS
+            pacing_ready = now - self._last_submit >= self._send_interval
 
             if self._link_allowed and self._submitted_at is None and pacing_ready:
                 retrying = self._pending_frame is not None

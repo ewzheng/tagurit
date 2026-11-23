@@ -26,8 +26,8 @@ Downstream decides whether to keep it, when to send it, and how.
 |---|---|
 | `protocol.py` | Shared image handoff datatype and priority validation |
 | `orchestrator.py` | Edge pipeline: stamps captured image bytes, tags them off the event loop into `ImageFrame`s, and runs the client on them |
-| `model/` | Tile-scoring models behind `scorer.TileScorer`: anomalib PatchCore, zero-shot CLIP through `transformers`, shared tile preprocessing, tiling, device choice; owned by Elias |
-| `tagging/` | Frame priority from the most unusual tile, a non-saturating score mapping, and saved bundles; owned by Elias |
+| `model/` | Tile-scoring models behind `scorer.TileScorer`, and `scorer.WindowedTileScorer` for scorers that remember recent frames: anomalib PatchCore, query-only CLIP with window novelty through `transformers`, the novelty window and its scale, shared tile preprocessing, tiling, device choice; owned by Elias |
+| `tagging/` | Frame priority from the most unusual tile, capture times passed to windowed scorers, a non-saturating score mapping, saved bundles, and the time-aware send order for banked frames (`order`); owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank, arbitration and in-flight frame ownership |
 | `client/scheduler_datatypes.py` | Operating states and internal priority bank entries |
 | `client/gabriel_transport.py` | One Gabriel image producer, receipt matching, timeouts, retries and communication-health reporting |
@@ -41,23 +41,52 @@ Downstream decides whether to keep it, when to send it, and how.
 frames to `client/main.py`. `sim/run_pipeline.py` is the end-to-end demo: it
 replays a dataset as captured image bytes into `orchestrator.run`, which tags
 each one with a bundle and feeds the same client, while `sim/pipeline_view.py`
-draws a live dashboard of the latest frame, the bank in send order and the
-frames sent, optionally recorded to MP4. The orchestrator takes
+draws a live dashboard of the latest frame and the bank and live queue in
+send order, the latest frame sent marked, optionally recorded to MP4. The orchestrator takes
 images from any source and never imports `sim/`, so a camera source plugs in
 the same way.
 
 ## Tagging
 
-A frame is decoded and cut into a grid of square tiles (512 px by default),
-because aerial targets are a few dozen pixels across and would vanish if the
-whole frame were resized to the model's input. A `TileScorer` gives each tile
+A frame is decoded and cut into a grid of square tiles (512 px by default
+for PatchCore, 224 px for CLIP), because aerial targets are a few dozen
+pixels across and would vanish if the whole frame were resized to the
+model's input. A `TileScorer` gives each tile
 a raw score. The frame's raw score is its highest tile score, and
 `s / (s + reference)` maps it into [0, 1). The mapping never saturates, so
 the bank's highest-score-first order is preserved instead of collapsing into
 ties at 1.0. `reference` is a high percentile of scores on target-free tiles,
 so 0.5 means "as unusual as the most unusual normal tiles".
 
-The current scorer is PatchCore through anomalib: a frozen WideResNet-50
+The CLIP scorer (`model/clip.py`) embeds each tile once and scores it on two
+terms. The query term is the tile's best dot product with "an aerial photo
+of {phrase}." minus "an aerial photo.", with no reject phrases. The novelty
+term is its distance to the nearest tile of an earlier frame in the last 10
+s (`model/novelty.py`), so a target that stays in view fades. On arrival
+each term becomes a percentile: the query against target-free calibration
+tiles saved in the bundle, novelty against a sample of the flight's earlier
+novelty. A tile scores the mean of the two percentiles, as a non-saturating
+log-odds. `Tagger.tag` passes each frame's capture time to such a windowed
+scorer, so frames must be tagged in capture order, and `Tagger.reset`
+starts a new flight. The scorer keeps the text encoder, so `set_targets`
+switches the query on board, and `retarget` rescores stored tile
+embeddings and novelty percentiles against a new query with one matrix
+product. `scripts/calibrate_clip.py` builds a bundle.
+
+`tagging/order.py` says which banked frame to send next, from capture
+times and priorities alone. A frame at or above the bundle's detection
+threshold (`Tagger.detection`) is a detection, and detections at most 10 s
+apart form an encounter. Detections go first, in passes: each encounter
+gets one frame, its best, before any gets a second, and the newest
+encounter goes first within a pass. A recent sighting is sent before an
+old one, and an old sighting seen once still goes before any repeat and
+before every frame below the threshold; those follow by priority.
+Encounters are derived from the frames on every call, so rescoring the
+bank for a new query regroups them. `calibrate_clip.py` sets the threshold
+at the 99.5th percentile of the priorities of target-free frames, scored
+in capture order as the scout would.
+
+PatchCore runs through anomalib: a frozen WideResNet-50
 embeds patches, and a tile's score is its largest distance to a memory bank
 of patches from normal tiles. `scripts/fit_patchcore.py` builds the bank
 from tiles that no ground-truth box comes near and saves a bundle directory;
@@ -74,7 +103,10 @@ falls back to boxes for box-annotated datasets. `sim/framelist.py` reads
 frame-labelled sequences from folders with a `frames.csv`. Public aerial
 datasets put a target in almost every frame, so `scripts/make_sparse.py`
 builds sparse streams from them by cutting fixed-size crops of real frames:
-mostly windows no box comes near, and a set share that hold one whole target.
+mostly windows no target box comes near, and a set share that hold one whole
+target. Targets are every labelled object by default, or only the classes
+given with `--classes`, so a stream for one query keeps other objects in its
+empty crops.
 
 ## States
 
@@ -131,11 +163,12 @@ communication eventually allows the retained work to be delivered.
 
 - Edge target: NVIDIA Jetson Orin NX 8GB; currently a laptop
 - Cloudlet target: remote compute node; currently tested locally
-- Models: PatchCore anomaly scoring through anomalib, and zero-shot CLIP through
-  Hugging Face `transformers` (optional `model` extra). New models load through
-  `transformers` rather than model-specific packages
+- Models: PatchCore anomaly scoring through anomalib, and query-only CLIP with
+  window novelty through Hugging Face `transformers` (optional `model` extra).
+  New models load through `transformers` rather than model-specific packages
 - Middleware: Gabriel client and server using WebSockets over TCP
-- Python: 3.12+, with dependencies managed by uv
+- Python: 3.10+, with dependencies managed by uv. The Jetson runs 3.10,
+  the only Python with CUDA PyTorch on JetPack 6
 
 ## Known limitations
 
@@ -153,10 +186,31 @@ communication eventually allows the retained work to be delivered.
   maximum over many tiles, so target-free frames land somewhat above 0.5
 - PatchCore treats anything absent from its bank as unusual: new terrain,
   lighting or camera altitude raises every score until the bank is refitted
+- CLIP's novelty is neutral for a flight's first 200 tiles, until its scale
+  has a sample, so those frames are ranked by the query alone
+- The client does not keep tile embeddings or rescore its bank, so
+  `clip.retarget` has no caller yet; the demo stamps frames with replay
+  times, not the dataset's
+- The bank does not use `tagging/order.py` yet: it still sends by priority
+  alone. PatchCore bundles, and CLIP bundles built before the threshold was
+  added, carry no detection threshold
+- An empty frame above the detection threshold within 10 s of two
+  encounters joins them into one, so a low threshold merges encounters; the
+  sparse streams, with several crops per moment, do this more than a real
+  1 fps stream would
+- The send order was tested only on SeaDronesSee, whose targets are counted
+  by the same 10 s rule that defines an encounter, and never on a mission
+  long enough for a target to be seen again hours later
 - The sparse streams are synthetic: crops are smaller than real frames, empty
   crops may hold unannotated targets, and they share scenes with the fit data
-- On the Jetson's JetPack 6 the only Python 3.12 CUDA PyTorch build is torch
-  2.8 from the Jetson AI Lab `jp6/cu129` index; it is untested on the device
+- Empty crops that clear every object sit away from where objects gather, off
+  the streets in a city, so scenery alone partly separates them from target
+  crops; per-class streams (`make_sparse.py --classes`) let empty crops keep
+  other objects
+- The Jetson's JetPack 6 has CUDA PyTorch only for Python 3.10, so the
+  Jetson and the laptop run different torch releases. The Jetson AI Lab's
+  Python 3.12 build needs glibc 2.38 (Ubuntu 22.04 has 2.35), and PyPI's
+  aarch64 wheels need a newer CUDA driver and fall back to the CPU
 
 ## Deferred
 

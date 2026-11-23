@@ -7,17 +7,20 @@ Usage:
 
 The bundle's ``fit.json`` names the dataset and the frames it was not fitted
 on; those are replayed in order, one every ``--interval`` seconds, as if a
-camera captured them. ``--dataset``, ``--sequences`` and ``--all-frames``
-replay something else. ``--empty-stride N`` keeps only every Nth frame
-without a target, raising the share of targets so they come up often enough
-to watch. ``tagurit.orchestrator`` tags each frame and runs the client, which
+camera captured them. The client sends at most one frame every
+``--send-interval`` seconds, 0.5 by default, so it outpaces arrivals and
+the bank drains after an outage. ``--dataset``, ``--sequences`` and
+``--all-frames`` replay something else. ``--empty-stride N`` keeps only
+every Nth frame without a target, raising the share of targets so they come
+up often enough to watch. ``tagurit.orchestrator`` tags each frame and runs the client, which
 sends over Gabriel to the receiver at ``client.config.GABRIEL_ENDPOINT``.
 
 The console shows the client's events and queue sizes as ``sim.run_client``
 does, with each frame's priority and, from the dataset's labels, whether it
 really holds a target. A window shows the same as pictures
 (``sim.pipeline_view``): the latest frame with the tile that set its
-priority, the bank in send order, and the frames sent most recently.
+priority, and the bank and live queue in send order, the latest frame sent
+ringed in red at the head of the queue it came from.
 ``--video PATH`` also writes that view to an MP4, and ``--no-view`` turns the
 window off for headless runs. Press q or Esc in the window to stop. Cut the
 network to watch tagged frames bank up; restore it to watch the bank drain
@@ -63,6 +66,8 @@ FIT_RECORD = "fit.json"
 FRAME_ID = re.compile(r"\bFrame (\d+)\b")
 WINDOW = "tagurit"
 VIEW_FPS = 10.0
+# Faster than frames arrive, so the bank visibly drains; the client's default is far slower.
+SEND_INTERVAL = 0.5
 
 
 class Recorder:
@@ -96,7 +101,7 @@ class Recorder:
 
         Return: the tagged frame
         """
-        result = self._tagger.score(image_bytes)
+        result = self._tagger.score(image_bytes, timestamp)
         image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         best = result.tiles[int(np.argmax(result.tile_scores))]
         target = self._targets.get(frame_id)
@@ -263,6 +268,7 @@ async def show(
 async def run_demo(
     frames: Sequence[TraceFrame],
     interval: float,
+    send_interval: float,
     recorder: Recorder,
     targets: dict[int, bool | None],
     window: bool,
@@ -278,6 +284,7 @@ async def run_demo(
     Parameters:
         - frames (Sequence[TraceFrame]): frames to replay
         - interval (float): seconds between releases
+        - send_interval (float): minimum seconds between the client's sends
         - recorder (Recorder): the tagger wrapper that feeds the console and dashboard
         - targets (dict[int, bool | None]): frame ID to ground truth
         - window (bool): show a window
@@ -289,7 +296,9 @@ async def run_demo(
     tracker = Tracker()
     quit_requested = asyncio.Event()
     report = console(recorder.priorities, targets, tracker, start)
-    pipeline = asyncio.create_task(orchestrator.run(replay(frames, interval), recorder, report))
+    pipeline = asyncio.create_task(
+        orchestrator.run(replay(frames, interval), recorder, report, send_interval)
+    )
     drawer = None
     if window or video is not None:
         drawer = asyncio.create_task(
@@ -333,6 +342,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--all-frames", action="store_true", help="include the fitted frames")
     parser.add_argument("--empty-stride", type=int, default=1, help="keep every Nth empty frame")
     parser.add_argument("--interval", type=float, default=FRAME_INTERVAL_SECONDS)
+    parser.add_argument(
+        "--send-interval", type=float, default=SEND_INTERVAL, help="minimum seconds between sends"
+    )
     parser.add_argument("--limit", type=int, help="replay at most this many frames")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument(
@@ -340,8 +352,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--video", type=Path, help="also write the dashboard to this MP4")
     args = parser.parse_args(argv)
-    if args.empty_stride <= 0 or args.interval < 0:
-        parser.error("--empty-stride must be positive and --interval non-negative")
+    if args.empty_stride <= 0 or args.interval < 0 or args.send_interval < 0:
+        parser.error("--empty-stride must be positive, --interval and --send-interval non-negative")
 
     record_path = args.bundle / FIT_RECORD
     record = json.loads(record_path.read_text()) if record_path.is_file() else None
@@ -353,7 +365,7 @@ def main(argv: list[str] | None = None) -> None:
     targets = {i: frame.has_target() for i, frame in enumerate(frames, start=1)}
     print(
         f"Replaying {len(frames)} frames, {sum(bool(t) for t in targets.values())} with a "
-        f"target, one every {args.interval:g}s",
+        f"target, one every {args.interval:g}s, sent at most one every {args.send_interval:g}s",
         flush=True,
     )
 
@@ -379,7 +391,9 @@ def main(argv: list[str] | None = None) -> None:
 
     recorder = Recorder(tagger, targets)
     try:
-        final = asyncio.run(run_demo(frames, args.interval, recorder, targets, args.view, video))
+        final = asyncio.run(
+            run_demo(frames, args.interval, args.send_interval, recorder, targets, args.view, video)
+        )
     except KeyboardInterrupt:
         print("\nPipeline stopped")
         return

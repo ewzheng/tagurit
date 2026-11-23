@@ -79,14 +79,16 @@ def test_run_hands_tagged_frames_to_the_client(monkeypatch: pytest.MonkeyPatch) 
     received: list[ImageFrame] = []
     reports: list[object] = []
 
-    async def fake_run_client(frames: AsyncIterable[ImageFrame], report: object) -> None:
+    async def fake_run_client(
+        frames: AsyncIterable[ImageFrame], report: object, send_interval: float
+    ) -> None:
         received.extend([frame async for frame in frames])
-        reports.append(report)
+        reports.append((report, send_interval))
 
     def report(event: str, detail: str, scheduler: object) -> None:
         pass
 
     monkeypatch.setattr(orchestrator, "run_client", fake_run_client)
-    asyncio.run(orchestrator.run(images([b"aa", b"b"]), LengthTagger(), report))
+    asyncio.run(orchestrator.run(images([b"aa", b"b"]), LengthTagger(), report, 0.25))
     assert [(f.frame_id, f.priority) for f in received] == [(1, 0.2), (2, 0.1)]
-    assert reports == [report]
+    assert reports == [(report, 0.25)]

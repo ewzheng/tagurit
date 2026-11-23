@@ -45,7 +45,7 @@ import torch.nn.functional as F
 sys.path.insert(0, str(Path(__file__).parent))
 from experiment_clipnn_robust import VOCABULARY  # noqa: E402
 
-from tagurit.model.clip import ClipConfig  # noqa: E402
+from tagurit.model.clip import DEFAULT_BACKGROUNDS, ClipConfig  # noqa: E402
 from tagurit.model.device import pick_device  # noqa: E402
 from tagurit.model.preprocess import tiles_to_tensor  # noqa: E402
 from tagurit.model.tiling import Tile, crop_tiles, decode_image, tile_grid  # noqa: E402
@@ -168,7 +168,7 @@ def prepare(args: argparse.Namespace) -> None:
 
     messages = {
         "scale": np.float32(model.logit_scale.exp().item()),
-        "handwritten": texts([say(p) for p in config.backgrounds]),
+        "handwritten": texts([say(p) for p in DEFAULT_BACKGROUNDS]),
         "vocabulary": texts([say(p) for p in VOCABULARY]),
     }
     for dataset, queries in QUERIES.items():

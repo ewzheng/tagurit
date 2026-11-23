@@ -5,7 +5,9 @@ This is the call the orchestrator makes for each captured frame before it
 builds an ``ImageFrame`` for the client. A frame's raw score is its most
 unusual tile, because one swimmer in one tile is the whole reason to keep
 the frame. The tagger works with any ``model.scorer.TileScorer`` and never
-learns which model is behind it.
+learns which model is behind it. A ``model.scorer.WindowedTileScorer`` also
+gets each frame's capture time, since its scores depend on the frames just
+before; such a tagger must be fed frames in capture order.
 
 Scoring is blocking compute. Called directly from the client's asyncio
 loop it would stall Gabriel transport, so call it through
@@ -16,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from tagurit.model.scorer import TileScorer
+from tagurit.model.scorer import TileScorer, WindowedTileScorer
 from tagurit.model.tiling import Tile, crop_tiles, decode_image, tile_grid
 from tagurit.protocol import ImageFrame
 from tagurit.tagging.priority import PriorityScale
@@ -44,37 +46,59 @@ class Tagger:
     """
     Score frames by their most unusual tile and map that onto a priority.
 
-    Holds no per-frame state; calls are independent. A non-positive tile
-    size RAISES ValueError.
+    Holds no per-frame state itself. With a ``WindowedTileScorer`` and a
+    timestamp, a frame's scores depend on the frames scored before it;
+    without a timestamp, or with a plain ``TileScorer``, calls are
+    independent. A non-positive tile size, or a detection threshold outside
+    [0, 1], RAISES ValueError.
 
     Parameters:
         - scorer (TileScorer): the model that scores tiles
         - scale (PriorityScale): maps the frame's raw score to a priority
         - tile_size (int): tile side length in frame pixels
+        - detection (float | None): priority at or above which a frame counts as a
+          detection for ``tagging.order``; None when the bundle was not calibrated for it
     """
 
-    def __init__(self, scorer: TileScorer, scale: PriorityScale, tile_size: int) -> None:
+    def __init__(
+        self,
+        scorer: TileScorer,
+        scale: PriorityScale,
+        tile_size: int,
+        detection: float | None = None,
+    ) -> None:
         if tile_size <= 0:
             raise ValueError(f"tile_size must be positive, got {tile_size}")
+        if detection is not None and not 0.0 <= detection <= 1.0:
+            raise ValueError(f"detection threshold must be in [0, 1], got {detection}")
         self.scorer = scorer
         self.scale = scale
         self.tile_size = tile_size
+        self.detection = detection
 
-    def score(self, image_bytes: bytes) -> FrameScore:
+    def score(self, image_bytes: bytes, timestamp: float | None = None) -> FrameScore:
         """
         Score one encoded frame.
 
-        Undecodable bytes, or a frame smaller than one tile, RAISE ValueError.
+        With a timestamp, a ``WindowedTileScorer`` scores the frame against
+        the frames before it and remembers it; otherwise tiles are scored on
+        their own. Undecodable bytes, or a frame smaller than one tile,
+        RAISE ValueError.
 
         Parameters:
             - image_bytes (bytes): encoded image, e.g. JPEG
+            - timestamp (float | None): capture time in seconds; None scores the frame alone
 
         Return: the frame's priority, raw score, and per-tile scores
         """
         image = decode_image(image_bytes)
         height, width = image.shape[:2]
         tiles = tile_grid(width, height, self.tile_size)
-        tile_scores = tuple(self.scorer.score_tiles(crop_tiles(image, tiles)))
+        crops = crop_tiles(image, tiles)
+        if timestamp is not None and isinstance(self.scorer, WindowedTileScorer):
+            tile_scores = tuple(self.scorer.score_frame(crops, timestamp))
+        else:
+            tile_scores = tuple(self.scorer.score_tiles(crops))
         if len(tile_scores) != len(tiles):
             raise ValueError(f"scorer returned {len(tile_scores)} scores for {len(tiles)} tiles")
         raw_score = max(tile_scores)
@@ -102,5 +126,16 @@ class Tagger:
             frame_id=frame_id,
             timestamp=timestamp,
             image_bytes=image_bytes,
-            priority=self.score(image_bytes).priority,
+            priority=self.score(image_bytes, timestamp).priority,
         )
+
+    def reset(self) -> None:
+        """
+        Make a windowed scorer forget recent frames, as at the start of a new flight.
+
+        Does nothing for a scorer that remembers nothing.
+
+        Return: void
+        """
+        if isinstance(self.scorer, WindowedTileScorer):
+            self.scorer.reset()

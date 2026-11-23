@@ -22,6 +22,7 @@ MODULES = [
     "tagurit.model.tiling",
     "tagurit.tagging",
     "tagurit.tagging.bundle",
+    "tagurit.tagging.order",
     "tagurit.tagging.priority",
     "tagurit.tagging.tagger",
     "tagurit.client",

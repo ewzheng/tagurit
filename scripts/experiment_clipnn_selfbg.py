@@ -36,7 +36,7 @@ import numpy as np
 import torch
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
-from tagurit.model.clip import ClipConfig
+from tagurit.model.clip import DEFAULT_BACKGROUNDS, ClipConfig
 from tagurit.model.device import pick_device
 from tagurit.model.preprocess import tiles_to_tensor
 from tagurit.model.tiling import crop_tiles, decode_image, tile_grid
@@ -166,7 +166,7 @@ def main(argv: list[str] | None = None) -> None:
     config = ClipConfig()
     targets = encoder.texts([config.template.format(p) for p in config.targets])
     everything = encoder.texts(
-        [config.template.format(p) for p in (*config.targets, *config.backgrounds)]
+        [config.template.format(p) for p in (*config.targets, *DEFAULT_BACKGROUNDS)]
     )
     n_targets = len(config.targets)
 

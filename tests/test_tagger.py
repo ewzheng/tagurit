@@ -32,6 +32,22 @@ class WrongCount:
         return [0.0] * (len(tiles) - 1)
 
 
+class Windowed(MeanBrightness):
+    """Remembers the timestamps it was given, as a scorer with a novelty window would."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timestamps: list[float] = []
+        self.resets = 0
+
+    def score_frame(self, tiles: Sequence[np.ndarray], timestamp: float) -> list[float]:
+        self.timestamps.append(timestamp)
+        return [float(tile.mean()) + 1.0 for tile in tiles]
+
+    def reset(self) -> None:
+        self.resets += 1
+
+
 def encode(image: np.ndarray) -> bytes:
     ok, png = cv2.imencode(".png", image)
     assert ok
@@ -74,9 +90,30 @@ def test_tag_builds_an_image_frame_with_the_original_bytes() -> None:
     assert 0.0 <= frame.priority < 1.0
 
 
+def test_windowed_scorer_gets_timestamps_and_plain_scorer_does_not() -> None:
+    windowed = Windowed()
+    tagger = Tagger(windowed, PriorityScale(reference=10.0), tile_size=32)
+    tagger.tag(frame_id=1, timestamp=5.0, image_bytes=frame_with_bright_corner())
+    alone = tagger.score(frame_with_bright_corner())
+    with_time = tagger.score(frame_with_bright_corner(), timestamp=6.0)
+    assert windowed.timestamps == [5.0, 6.0]
+    assert windowed.calls == 1  # the call without a timestamp scored tiles alone
+    assert with_time.raw_score == pytest.approx(alone.raw_score + 1.0)
+    tagger.reset()
+    assert windowed.resets == 1
+
+    plain = MeanBrightness()
+    plain_tagger = Tagger(plain, PriorityScale(reference=10.0), tile_size=32)
+    plain_tagger.score(frame_with_bright_corner(), timestamp=1.0)
+    plain_tagger.reset()  # nothing to forget
+    assert plain.calls == 1
+
+
 def test_tagger_rejects_bad_input() -> None:
     with pytest.raises(ValueError):
         Tagger(MeanBrightness(), PriorityScale(reference=1.0), tile_size=0)
+    with pytest.raises(ValueError):
+        Tagger(MeanBrightness(), PriorityScale(reference=1.0), tile_size=32, detection=1.5)
     with pytest.raises(ValueError):
         Tagger(WrongCount(), PriorityScale(reference=1.0), tile_size=32).score(
             frame_with_bright_corner()

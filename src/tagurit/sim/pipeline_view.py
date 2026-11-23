@@ -1,5 +1,5 @@
 """
-Draw the end-to-end demo: the latest frame, the bank in send order, and what was sent.
+Draw the end-to-end demo: the latest frame, and the bank and live queue in send order.
 
 ``Tracker`` follows the client's report events to know where each frame is:
 in the live queue, in the bank, in flight, or acknowledged. It reads only
@@ -22,6 +22,7 @@ from tagurit.client.frame_scheduler import FrameScheduler
 
 ARRIVE = re.compile(r"\bFrame (\d+) -> (live|bank)\b")
 MIGRATE = re.compile(r"\bFrame (\d+) live -> bank\b")
+SUBMIT = re.compile(r"\bFrame (\d+) from (live|bank)\b")
 FRAME_ID = re.compile(r"\bFrame (\d+)\b")
 
 SIZE = (1280, 720)
@@ -34,6 +35,7 @@ STATE_COLOURS = {
 }
 TARGET_COLOUR = (60, 200, 60)
 EMPTY_COLOUR = (130, 130, 130)
+SENDING_COLOUR = (40, 40, 230)
 TILE_COLOUR = (0, 215, 255)
 INK = (235, 235, 235)
 BACKGROUND = (30, 30, 30)
@@ -72,11 +74,16 @@ class Tracker:
         - lanes (dict[int, str]): frame ID to its current lane
         - sent (list[int]): acknowledged frame IDs in acknowledgement order
         - state (str): the scheduler's state at the latest event
+        - sending (int | None): the frame submitted most recently, kept after its
+          receipt until the next submission
+        - sending_from (str | None): the queue, "live" or "bank", ``sending`` came from
     """
 
     lanes: dict[int, str] = field(default_factory=dict)
     sent: list[int] = field(default_factory=list)
     state: str = "STARTING"
+    sending: int | None = None
+    sending_from: str | None = None
 
     def update(self, event: str, detail: str, scheduler: FrameScheduler) -> None:
         """
@@ -94,8 +101,10 @@ class Tracker:
             self.lanes[int(match.group(1))] = match.group(2)
         elif event == "MIGRATE" and (match := MIGRATE.search(detail)):
             self.lanes[int(match.group(1))] = "bank"
-        elif event in ("SUBMIT", "RESEND") and (match := FRAME_ID.search(detail)):
-            self.lanes[int(match.group(1))] = "inflight"
+        elif event in ("SUBMIT", "RESEND") and (match := SUBMIT.search(detail)):
+            frame_id = int(match.group(1))
+            self.lanes[frame_id] = "inflight"
+            self.sending, self.sending_from = frame_id, match.group(2)
         elif event == "ACK" and (match := FRAME_ID.search(detail)):
             frame_id = int(match.group(1))
             self.lanes[frame_id] = "sent"
@@ -165,8 +174,11 @@ def render(
 
     The latest frame fills the left with its best tile outlined. The right
     column shows the bank in send order, highest priority first, and the
-    bottom strip the most recently acknowledged frames, newest on the
-    right. Green borders mark frames that hold a target.
+    bottom strip the live queue in send order, oldest on the left. The frame
+    sent most recently leads the queue it was taken from, ringed in red,
+    until the next is sent: a local receipt returns well within one redraw,
+    so ringing only the frame in flight would miss most sends. Green borders
+    mark frames that hold a target.
 
     Parameters:
         - tracker (Tracker): where each frame is
@@ -214,20 +226,28 @@ def render(
             2,
         )
 
+    lead: dict[str, list[int]] = {"live": [], "bank": []}
+    if tracker.sending in views and tracker.sending_from in lead:
+        lead[tracker.sending_from].append(tracker.sending)
+    bank_column = lead["bank"] + bank
     _text(canvas, "bank, next to send", (870, 74), 0.6, 1)
-    for i, frame_id in enumerate(bank[:8]):
-        _thumbnail(canvas, views[frame_id], (870 + (i % 2) * 204, 86 + (i // 2) * 136))
-    if len(bank) > 8:
-        _text(canvas, f"+{len(bank) - 8} more", (870, 640), 0.55, 1)
+    for i, frame_id in enumerate(bank_column[:8]):
+        at = (870 + (i % 2) * 204, 86 + (i // 2) * 136)
+        _thumbnail(canvas, views[frame_id], at, frame_id == tracker.sending)
+    if len(bank_column) > 8:
+        _text(canvas, f"+{len(bank_column) - 8} more", (870, 640), 0.55, 1)
 
-    _text(canvas, "sent, newest on the right", (14, 560), 0.6, 1)
-    for i, frame_id in enumerate(tracker.sent[-4:]):
-        if frame_id in views:
-            _thumbnail(canvas, views[frame_id], (14 + i * 204, 572))
+    live = [f for f in tracker.in_lane("live") if f in views]
+    live_strip = lead["live"] + live
+    more = f"   +{len(live_strip) - 4} more" if len(live_strip) > 4 else ""
+    _text(canvas, f"live, next to send{more}", (14, 560), 0.6, 1)
+    for i, frame_id in enumerate(live_strip[:4]):
+        at = (14 + i * 204, 572)
+        _thumbnail(canvas, views[frame_id], at, frame_id == tracker.sending)
     return canvas
 
 
-def _thumbnail(canvas: np.ndarray, view: FrameView, at: tuple[int, int]) -> None:
+def _thumbnail(canvas: np.ndarray, view: FrameView, at: tuple[int, int], sending: bool) -> None:
     """
     Paste a thumbnail with a border coloured by ground truth and its priority beneath.
 
@@ -235,6 +255,7 @@ def _thumbnail(canvas: np.ndarray, view: FrameView, at: tuple[int, int]) -> None
         - canvas (np.ndarray): MUTATED, the dashboard
         - view (FrameView): the frame to draw
         - at (tuple[int, int]): top-left corner, pixels
+        - sending (bool): the frame was sent most recently, so a red ring goes around the border
 
     Return: void
     """
@@ -242,6 +263,8 @@ def _thumbnail(canvas: np.ndarray, view: FrameView, at: tuple[int, int]) -> None
     h, w = view.thumbnail.shape[:2]
     colour = TARGET_COLOUR if view.target else EMPTY_COLOUR
     cv2.rectangle(canvas, (x - 2, y - 2), (x + w + 1, y + h + 1), colour, 3)
+    if sending:
+        cv2.rectangle(canvas, (x - 6, y - 6), (x + w + 5, y + h + 5), SENDING_COLOUR, 3)
     _text(canvas, f"#{view.frame_id}  {view.priority:.3f}", (x, y + h + 18), 0.5, 1)
 
 

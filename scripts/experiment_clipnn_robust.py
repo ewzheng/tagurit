@@ -33,7 +33,7 @@ import numpy as np
 import torch
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer
 
-from tagurit.model.clip import ClipConfig
+from tagurit.model.clip import DEFAULT_BACKGROUNDS, ClipConfig
 from tagurit.model.device import pick_device
 from tagurit.model.preprocess import tiles_to_tensor
 from tagurit.model.tiling import crop_tiles, decode_image, tile_grid
@@ -211,7 +211,7 @@ def main(argv: list[str] | None = None) -> None:
     header = "  ".join(f"top{100 * f:g}%" for f in TOP_FRACTIONS)
     print(f"  {'background':14s} {'dataset':20s} frames tgts  AUROC     AP  {header}")
     for dataset in args.datasets:
-        full = [p for p in config.backgrounds]
+        full = [p for p in DEFAULT_BACKGROUNDS]
         ablated = [p for p in full if p not in HOME_TERRAIN.get(dataset, set())]
         fixed = {"full": encoder.texts([say(p) for p in full]),
                  "ablated": encoder.texts([say(p) for p in ablated])}  # fmt: skip

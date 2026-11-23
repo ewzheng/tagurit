@@ -24,6 +24,8 @@ def test_datasets_are_named() -> None:
         "seadronessee",
         "sparse-seadronessee",
         "sparse-visdrone",
+        "sparse-visdrone-car",
+        "sparse-visdrone-person",
         "visdrone",
     ]
 

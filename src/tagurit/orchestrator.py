@@ -16,6 +16,7 @@ import time
 from collections.abc import AsyncIterable, AsyncIterator, Callable
 from typing import Protocol
 
+from tagurit.client.config import SEND_INTERVAL_SECONDS
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.protocol import ImageFrame
@@ -72,6 +73,7 @@ async def run(
     images: AsyncIterable[bytes],
     tagger: FrameTagger,
     report: Callable[[str, str, FrameScheduler], None],
+    send_interval: float = SEND_INTERVAL_SECONDS,
 ) -> None:
     """
     Tag images and run the client on them until the images end and every frame is acknowledged.
@@ -83,7 +85,8 @@ async def run(
         - images (AsyncIterable[bytes]): encoded images in capture order
         - tagger (FrameTagger): scores each image
         - report (Callable): receives each client event, its detail, and the scheduler
+        - send_interval (float): minimum seconds between the client's image submissions
 
     Return: void
     """
-    await run_client(tag_frames(images, tagger), report)
+    await run_client(tag_frames(images, tagger), report, send_interval)

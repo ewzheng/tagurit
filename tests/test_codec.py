@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 from gabriel_protocol.v1 import gabriel_pb2
 
 from tagurit.client.frame_scheduler import FrameScheduler
@@ -24,7 +25,7 @@ def _jpeg(width: int, height: int) -> bytes:
     return encoded.tobytes()
 
 
-def test_h264_odd_dimensions_and_retry(monkeypatch) -> None:
+def test_h264_odd_dimensions_and_retry() -> None:
     """A lost receipt triggers the identical H.264 payload and one acceptance."""
     jpeg = _jpeg(17, 15)
     encoded, width, height = encode_video(jpeg, "h264", 32)
@@ -33,12 +34,11 @@ def test_h264_odd_dimensions_and_retry(monkeypatch) -> None:
 
     scheduler = FrameScheduler()
     session = "00000000-0000-0000-0000-000000000001"
-    transport = GabrielTransport(scheduler, session, lambda _event, _detail: None)
+    transport = GabrielTransport(scheduler, session, lambda _event, _detail: None, send_interval=0)
     transport._ready = True
     transport._active_attempt = 1
     transport._update_scheduler_connection()
     scheduler.add_frame(ImageFrame(1, 0.0, jpeg, 0.8))
-    monkeypatch.setattr("tagurit.client.gabriel_transport.SEND_INTERVAL_SECONDS", 0)
 
     async def transmit_twice():
         first = await transport._produce(1)
@@ -67,3 +67,11 @@ def test_h264_odd_dimensions_and_retry(monkeypatch) -> None:
     transport._receive_result(SimpleNamespace(string_result=retry_result.payload), 2)
     assert transport.completed == 1
     assert scheduler.pending_count() == 0
+
+
+@pytest.mark.parametrize("interval", [-1.0, float("nan"), float("inf"), True])
+def test_transport_rejects_an_invalid_send_interval(interval: float) -> None:
+    """A send interval must be a non-negative finite number."""
+    session = "00000000-0000-0000-0000-000000000001"
+    with pytest.raises(ValueError, match="Send interval"):
+        GabrielTransport(FrameScheduler(), session, lambda _e, _d: None, send_interval=interval)

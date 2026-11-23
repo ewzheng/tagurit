@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import AsyncIterable, Callable
 from uuid import uuid4
 
-from tagurit.client.config import LOOP_INTERVAL_SECONDS
+from tagurit.client.config import LOOP_INTERVAL_SECONDS, SEND_INTERVAL_SECONDS
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.gabriel_transport import GabrielTransport
 from tagurit.client.scheduler_datatypes import SchedulerState
@@ -17,7 +17,11 @@ from tagurit.protocol import ImageFrame
 
 
 # Run the client with a supplied frame source and event reporter
-async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[str, str, FrameScheduler], None]) -> None:
+async def run_client(
+    frame_source: AsyncIterable[ImageFrame],
+    report: Callable[[str, str, FrameScheduler], None],
+    send_interval: float = SEND_INTERVAL_SECONDS,
+) -> None:
     """
     Collect scored frames while Gabriel sends and reconnects as needed
 
@@ -29,6 +33,7 @@ async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[
     Parameters:
         - frame_source (AsyncIterable[ImageFrame]): Stream of scored frames
         - report (Callable): Callback receiving event, detail and scheduler
+        - send_interval (float): Minimum seconds between image submissions
 
     Return:
         void
@@ -44,7 +49,7 @@ async def run_client(frame_source: AsyncIterable[ImageFrame], report: Callable[[
         report(event, detail, scheduler)
 
     # Use actual transport health without a simulated availability restriction
-    transport = GabrielTransport(scheduler, session_id, report_event)
+    transport = GabrielTransport(scheduler, session_id, report_event, send_interval=send_interval)
     transport.set_link_allowed(True)
 
     # Collect frames independently of connection attempts and transmission

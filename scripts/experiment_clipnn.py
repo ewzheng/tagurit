@@ -36,7 +36,7 @@ cancels effects such as sun glint that lift every patch of a tile at once.
 Each method is a ``TileScorer``, so ``tagging.Tagger`` tiles the frame and a
 frame scores its best tile, as in the pipeline; for the patch methods a tile
 scores its best patch. Text prompts are ``ClipConfig``'s defaults, the same
-targets and backgrounds the pipeline's CLIP tagger uses. Prints frame-level
+targets the pipeline's CLIP tagger uses, against ``DEFAULT_BACKGROUNDS``. Prints frame-level
 AUROC, average precision, top-fraction recall and milliseconds per frame.
 Nothing in the package changes.
 """
@@ -52,7 +52,7 @@ import numpy as np
 import torch
 from transformers import AutoImageProcessor, AutoModel, AutoTokenizer, Owlv2ForObjectDetection
 
-from tagurit.model.clip import ClipConfig, ClipScorer
+from tagurit.model.clip import DEFAULT_BACKGROUNDS, ClipConfig
 from tagurit.model.device import pick_device
 from tagurit.model.preprocess import tiles_to_tensor
 from tagurit.sim import dataloader
@@ -78,6 +78,55 @@ def _tensor(output: object) -> torch.Tensor:
     Return: the tensor
     """
     return output if isinstance(output, torch.Tensor) else output.pooler_output  # type: ignore[attr-defined]
+
+
+class RejectPhraseClip:
+    """
+    The pipeline's former CLIP scorer: softmax of the target prompts against reject phrases.
+
+    Kept here so this experiment's "clip" row still measures what it did;
+    the package now scores by the query alone (``tagurit.model.clip``).
+
+    Parameters:
+        - config (ClipConfig): checkpoint, targets and template; rejects are DEFAULT_BACKGROUNDS
+        - device (str): torch device
+        - batch_size (int): tiles per forward pass
+    """
+
+    def __init__(self, config: ClipConfig, device: str, batch_size: int = 32) -> None:
+        self.targets = len(config.targets)
+        self.device, self.batch_size = device, batch_size
+        self.model = AutoModel.from_pretrained(config.model).to(device).half().eval()
+        processor = AutoImageProcessor.from_pretrained(config.model)
+        self.mean, self.std = processor.image_mean, processor.image_std
+        self.size = int(self.model.config.vision_config.image_size)
+        tokenizer = AutoTokenizer.from_pretrained(config.model)
+        prompts = [config.template.format(p) for p in (*config.targets, *DEFAULT_BACKGROUNDS)]
+        tokens = tokenizer(prompts, padding=True, return_tensors="pt").to(device)
+        with torch.no_grad():
+            text = _tensor(self.model.get_text_features(**tokens)).float()
+            self.scale = float(self.model.logit_scale.exp())
+        self.text = text / text.norm(dim=-1, keepdim=True)
+
+    def score_tiles(self, tiles: Sequence[np.ndarray]) -> list[float]:
+        """
+        Score each tile by the probability mass on the target prompts.
+
+        Parameters:
+            - tiles (Sequence[np.ndarray]): uint8 RGB square tiles
+
+        Return: one score in [0, 1] per tile
+        """
+        scores: list[float] = []
+        with torch.no_grad():
+            for start in range(0, len(tiles), self.batch_size):
+                batch = tiles[start : start + self.batch_size]
+                pixels = tiles_to_tensor(batch, self.size, self.mean, self.std, self.device).half()
+                image = _tensor(self.model.get_image_features(pixel_values=pixels)).float()
+                image = image / image.norm(dim=-1, keepdim=True)
+                probs = (self.scale * image @ self.text.T).softmax(dim=-1)
+                scores.extend(float(p) for p in probs[:, : self.targets].sum(dim=-1).cpu())
+        return scores
 
 
 def aggregate(target: torch.Tensor) -> dict[str, list[float]]:
@@ -124,7 +173,7 @@ class TipsScorer:
         self.size, self.dense, self.device, self.batch_size = size, dense, device, batch_size
         self.model = AutoModel.from_pretrained(self.MODEL).to(device).half().eval()
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL)
-        prompts = [config.template.format(p) for p in (*config.targets, *config.backgrounds)]
+        prompts = [config.template.format(p) for p in (*config.targets, *DEFAULT_BACKGROUNDS)]
         tokens = tokenizer(prompts, padding=True, return_tensors="pt").to(device)
         with torch.no_grad():
             text = _tensor(self.model.get_text_features(**tokens)).float()
@@ -189,7 +238,7 @@ class Siglip2TileScorer:
         self.mean, self.std = processor.image_mean, processor.image_std
         self.size = int(self.model.config.vision_config.image_size)
         tokenizer = AutoTokenizer.from_pretrained(self.MODEL)
-        prompts = [config.template.format(p) for p in (*config.targets, *config.backgrounds)]
+        prompts = [config.template.format(p) for p in (*config.targets, *DEFAULT_BACKGROUNDS)]
         tokens = tokenizer(prompts, padding="max_length", max_length=64, return_tensors="pt")
         with torch.no_grad():
             text = _tensor(self.model.get_text_features(**tokens.to(device))).float()
@@ -242,7 +291,7 @@ class DenseClipScorer:
         processor = AutoImageProcessor.from_pretrained(CLIP_MODEL)
         self.mean, self.std = processor.image_mean, processor.image_std
         tokenizer = AutoTokenizer.from_pretrained(CLIP_MODEL)
-        prompts = [config.template.format(p) for p in (*config.targets, *config.backgrounds)]
+        prompts = [config.template.format(p) for p in (*config.targets, *DEFAULT_BACKGROUNDS)]
         tokens = tokenizer(prompts, padding=True, return_tensors="pt").to(device)
         with torch.no_grad():
             text = _tensor(self.model.get_text_features(**tokens)).float()
@@ -440,7 +489,7 @@ def main(argv: list[str] | None = None) -> None:
     device = pick_device(args.device)
     config = ClipConfig()
     tile_models = {
-        "clip": lambda: ClipScorer.load(config, device=device, half=True),
+        "clip": lambda: RejectPhraseClip(config, device),
         "siglip2": lambda: Siglip2TileScorer(config, device),
         "siglip2_sig": lambda: Siglip2TileScorer(config, device, sigmoid=True),
         "tips_tile": lambda: TipsScorer(config, 224, False, device),

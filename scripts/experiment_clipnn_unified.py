@@ -35,7 +35,7 @@ import torch.nn.functional as F
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor, AutoTokenizer
 
-from tagurit.model.clip import ClipConfig
+from tagurit.model.clip import DEFAULT_BACKGROUNDS, ClipConfig
 from tagurit.model.device import pick_device
 from tagurit.model.preprocess import tiles_to_tensor
 from tagurit.model.tiling import crop_tiles, decode_image, tile_grid
@@ -260,7 +260,7 @@ def main(argv: list[str] | None = None) -> None:
     rng = np.random.default_rng(0)
     config = ClipConfig()
     targets = [config.template.format(p) for p in config.targets]
-    backgrounds = [config.template.format(p) for p in config.backgrounds]
+    backgrounds = [config.template.format(p) for p in DEFAULT_BACKGROUNDS]
 
     tiles: list[np.ndarray] = []
     tile_truth: list[bool | None] = []
