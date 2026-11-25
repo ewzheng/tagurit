@@ -9,10 +9,11 @@ import heapq
 import math
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 
 from tagurit.client.config import LIVE_FRAME_WEIGHT, LIVE_TO_BANK_INTERVAL_SECONDS, STORED_FRAME_WEIGHT
-from tagurit.client.scheduler_datatypes import LiveQueueEntry, PriorityBankEntry, SchedulerState
+from tagurit.client.scheduler_datatypes import BankOrder, LiveQueueEntry, PriorityBankEntry, SchedulerState
 from tagurit.protocol import ImageFrame
 
 
@@ -23,6 +24,8 @@ class FrameScheduler:
 
     Live frames use FIFO order and banked frames use highest priority first
     Equal scores use original scheduler arrival order across both queues
+    A supplied bank order replaces highest priority first for banked frames
+    It sees waiting frames and every acknowledged frame so repeats can wait
     Calls MUST be serialized by the caller
 
     Parameters:
@@ -30,10 +33,11 @@ class FrameScheduler:
         - stored_weight (int): Stored turns per reintegration cycle
         - migration_interval (float): Seconds between live-to-bank moves during outages
         - clock (Callable): Monotonic clock used for timing and offline tests
+        - bank_order (BankOrder | None): Chooses the next banked frame or None for highest priority
     """
 
     # Create the queues, turn pattern and disconnected timer
-    def __init__(self, live_weight: int = LIVE_FRAME_WEIGHT, stored_weight: int = STORED_FRAME_WEIGHT, migration_interval: float = LIVE_TO_BANK_INTERVAL_SECONDS, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(self, live_weight: int = LIVE_FRAME_WEIGHT, stored_weight: int = STORED_FRAME_WEIGHT, migration_interval: float = LIVE_TO_BANK_INTERVAL_SECONDS, clock: Callable[[], float] = time.monotonic, bank_order: BankOrder | None = None) -> None:
 
         # Reject invalid queue weights and timer intervals
         if type(live_weight) is not int or type(stored_weight) is not int:
@@ -54,6 +58,10 @@ class FrameScheduler:
         self._live_queue: deque[LiveQueueEntry] = deque()
         self._priority_bank: list[PriorityBankEntry] = []
         self._arrival_order = 0
+
+        # Remember capture times and scores of acknowledged frames for the bank order
+        self._bank_order = bank_order
+        self._delivered: list[tuple[float, float]] = []
 
         # Set the order of live and stored turns
         self._turn_pattern = [True] * live_weight + [False] * stored_weight
@@ -206,12 +214,115 @@ class FrameScheduler:
             if use_live_queue and self._live_queue:
                 frame = self._live_queue.popleft().frame
             else:
-                frame = heapq.heappop(self._priority_bank).frame
+                frame = self._take_banked_frame()
                 from_bank = True
 
         self._inflight_frame = frame
         self._inflight_from_bank = from_bank
         return frame
+
+    # List every frame still waiting in either queue
+    def waiting_frames(self) -> list[ImageFrame]:
+        """
+        Read the frames waiting in the live queue and the bank
+
+        The in-flight frame is left out because its transmission has started
+
+        Return:
+            Waiting ImageFrames in original arrival order
+        """
+        entries = [*self._live_queue, *self._priority_bank]
+        return [entry.frame for entry in sorted(entries, key=lambda entry: entry.arrival_order)]
+
+    # Replace the scores of waiting frames after the query changes
+    def reprioritize(self, priorities: Mapping[int, float]) -> int:
+        """
+        Give waiting frames new scores while keeping their place and contents
+
+        MUTATES both queues and reorders the bank
+        IDs that are not waiting are ignored and the in-flight frame is untouched
+        Acknowledged-frame history is cleared because its scores used the old query
+        An invalid score RAISES ValueError and changes nothing
+
+        Parameters:
+            - priorities (Mapping[int, float]): New score between 0 and 1 by frame ID
+
+        Return:
+            Number of waiting frames that received a new score
+        """
+
+        # Build every replacement first so a bad score leaves the queues unchanged
+        def rescored(frame: ImageFrame) -> ImageFrame:
+            if frame.frame_id not in priorities:
+                return frame
+
+            return replace(frame, priority=priorities[frame.frame_id])
+
+        live = [LiveQueueEntry(entry.arrival_order, rescored(entry.frame)) for entry in self._live_queue]
+        bank = [PriorityBankEntry(arrival_order=entry.arrival_order, frame=rescored(entry.frame)) for entry in self._priority_bank]
+        changed = sum(entry.frame.frame_id in priorities for entry in [*live, *bank])
+
+        self._live_queue = deque(live)
+        self._priority_bank = bank
+        heapq.heapify(self._priority_bank)
+        self._delivered.clear()
+        return changed
+
+    # List waiting banked frames in arrival order followed by acknowledged frames
+    def _bank_view(self) -> tuple[list[PriorityBankEntry], list[float], list[float], list[bool]]:
+        entries = sorted(self._priority_bank, key=lambda entry: entry.arrival_order)
+        timestamps = [entry.frame.timestamp for entry in entries] + [t for t, _ in self._delivered]
+        priorities = [entry.frame.priority for entry in entries] + [p for _, p in self._delivered]
+        sent = [False] * len(entries) + [True] * len(self._delivered)
+        return entries, timestamps, priorities, sent
+
+    # Ask the bank order for a waiting frame and reject any other answer
+    def _choose(self, entries: list[PriorityBankEntry], timestamps: list[float], priorities: list[float], sent: list[bool]) -> int:
+        choice = self._bank_order(timestamps, priorities, sent)
+
+        if choice is None or not 0 <= choice < len(entries) or sent[choice]:
+            raise ValueError("Bank order must choose a waiting banked frame")
+
+        return choice
+
+    # Remove the next banked frame by score or by the supplied order
+    def _take_banked_frame(self) -> ImageFrame:
+        if self._bank_order is None:
+            return heapq.heappop(self._priority_bank).frame
+
+        entries, timestamps, priorities, sent = self._bank_view()
+        entry = entries[self._choose(entries, timestamps, priorities, sent)]
+        self._priority_bank.remove(entry)
+        heapq.heapify(self._priority_bank)
+        return entry.frame
+
+    # Preview the next banked frames without selecting them
+    def stored_order(self, limit: int) -> list[int]:
+        """
+        Read the IDs of the next banked frames in the order the bank would send them
+
+        The preview assumes no further arrivals and ignores live turns
+        The queues are NOT changed
+
+        Parameters:
+            - limit (int): Most frame IDs to return
+
+        Return:
+            Frame IDs with the next to send first
+        """
+        if self._bank_order is None:
+            return [entry.frame.frame_id for entry in heapq.nsmallest(limit, self._priority_bank)]
+
+        entries, timestamps, priorities, sent = self._bank_view()
+        order: list[int] = []
+
+        # Mark each preview pick as sent so the next pick follows it
+        while len(order) < min(limit, len(entries)):
+            choice = self._choose(entries, timestamps, priorities, sent)
+            sent[choice] = True
+            order.append(entries[choice].frame.frame_id)
+
+        return order
 
     # Release the selected frame after its receipt has been checked
     def acknowledge_frame(self, frame_id: int) -> None:
@@ -229,6 +340,10 @@ class FrameScheduler:
         """
         if self._inflight_frame is None or self._inflight_frame.frame_id != frame_id:
             raise ValueError("Receipt does not match the in-flight frame")
+
+        # Frames delivered from either queue count toward the bank order
+        if self._bank_order is not None:
+            self._delivered.append((self._inflight_frame.timestamp, self._inflight_frame.priority))
 
         self._inflight_frame = None
         self._inflight_from_bank = False

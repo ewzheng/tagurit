@@ -24,12 +24,12 @@ Downstream decides whether to keep it, when to send it, and how.
 
 | Module | Responsibility |
 |---|---|
-| `protocol.py` | Shared image handoff datatype and priority validation |
-| `orchestrator.py` | Edge pipeline: stamps captured image bytes, tags them off the event loop into `ImageFrame`s, and runs the client on them |
+| `protocol.py` | Shared image handoff datatype, priority validation, and the opaque state a tagger keeps with a frame for rescoring |
+| `orchestrator.py` | Edge pipeline: stamps captured image bytes, tags the newest one off the event loop into an `ImageFrame` whenever the tagger is free, dropping images that go stale while it is busy, and runs the client on the tagged frames |
 | `model/` | Tile-scoring models behind `scorer.TileScorer`, and `scorer.WindowedTileScorer` for scorers that remember recent frames: anomalib PatchCore, query-only CLIP with window novelty through `transformers`, the novelty window and its scale, shared tile preprocessing, tiling, device choice; owned by Elias |
 | `tagging/` | Frame priority from the most unusual tile, capture times passed to windowed scorers, a non-saturating score mapping, saved bundles, and the time-aware send order for banked frames (`order`); owned by Elias |
-| `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank, arbitration and in-flight frame ownership |
-| `client/scheduler_datatypes.py` | Operating states and internal priority bank entries |
+| `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank with an optional caller-supplied send order, arbitration and in-flight frame ownership |
+| `client/scheduler_datatypes.py` | Operating states, internal priority bank entries and the bank order's signature |
 | `client/gabriel_transport.py` | One Gabriel image producer, receipt matching, timeouts, retries and communication-health reporting |
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
@@ -72,6 +72,20 @@ starts a new flight. The scorer keeps the text encoder, so `set_targets`
 switches the query on board, and `retarget` rescores stored tile
 embeddings and novelty percentiles against a new query with one matrix
 product. `scripts/calibrate_clip.py` builds a bundle.
+
+A mission change is a new set of query phrases. `orchestrator.run` takes
+them as `missions`: for each one it switches the tagger's query
+(`Tagger.set_targets`), so frames tagged from then on use it, and hands the
+client a rescorer. The client gives the rescorer every frame still waiting
+in the live queue or the bank and replaces their priorities
+(`FrameScheduler.reprioritize`), then again for any frame that arrived
+meanwhile. Rescoring reads no image: a CLIP-tagged `ImageFrame` carries
+`kept`, the frame's tile embeddings in half precision and the novelty its
+tiles had on arrival, about 25 KB for 24 tiles, and `Tagger.rescore` turns
+those into new priorities with one matrix product (`clip.retarget`). The
+client holds `kept` as long as it holds the frame and never looks inside
+or transmits it. Encounters regroup on their own, since the bank order
+derives them from priorities on every turn.
 
 `tagging/order.py` says which banked frame to send next, from capture
 times and priorities alone. A frame at or above the bundle's detection
@@ -117,7 +131,14 @@ empty crops.
 | Reintegrating | Enter the live FIFO queue | Share turns between live traffic and the priority bank |
 
 The priority bank selects the highest score first, with arrival order
-breaking ties. The default reintegration ratio is two live turns per
+breaking ties. When the orchestrator's caller supplies a bank order, the
+bank asks it instead on every stored turn, passing the capture time and
+priority of each waiting frame and of every frame already acknowledged
+from either queue. The demo supplies `tagging.order.next_frame` whenever
+the bundle has a detection threshold, so the bank sends one frame per
+encounter before any repeat, newest encounter first, and a detection that
+already went out live counts towards its encounter. The scheduler never
+imports `tagging/`; the order is passed in. The default reintegration ratio is two live turns per
 stored turn. Stored traffic can use a live turn when the live queue is empty.
 
 The transport reports communication availability to the scheduler:
@@ -180,20 +201,33 @@ communication eventually allows the retained work to be delivered.
 - Stopping either application loses its in-memory records
 - The repeating demo stops immediately on Ctrl+C and may leave queued frames
 - The receiver accepts images but does not yet run a heavy model
-- The orchestrator tags one image at a time; a source faster than tagging is
-  slowed down rather than dropping stale frames as a live camera should
+- The orchestrator drops an image only for being stale or, with
+  `min_interval`, too soon after the last one tagged; it does not test
+  whether the picture changed. Consecutive drone frames always differ
+  somewhere by more than a small target would (measured on VisDrone and
+  SeaDronesSee), so a pixel-change test that is safe for small targets
+  would drop nothing in flight
+- The scheduler keeps the capture time and priority of every acknowledged
+  frame for the bank order and reads the whole bank on each stored turn,
+  which is fine for thousands of frames and unbounded beyond that
 - The priority reference is calibrated on tiles, while frames take the
   maximum over many tiles, so target-free frames land somewhat above 0.5
 - PatchCore treats anything absent from its bank as unusual: new terrain,
   lighting or camera altitude raises every score until the bank is refitted
 - CLIP's novelty is neutral for a flight's first 200 tiles, until its scale
   has a sample, so those frames are ranked by the query alone
-- The client does not keep tile embeddings or rescore its bank, so
-  `clip.retarget` has no caller yet; the demo stamps frames with replay
-  times, not the dataset's
-- The bank does not use `tagging/order.py` yet: it still sends by priority
-  alone. PatchCore bundles, and CLIP bundles built before the threshold was
-  added, carry no detection threshold
+- A mission change reaches the scout only through the demo's `--retarget`
+  flag; the cloudlet cannot send one yet. The priority scale and detection
+  threshold are kept across a query change, which relies on the query term
+  being rescaled against the bundle's calibration tiles and is untested
+- Acknowledged frames give up their kept embeddings, so after a query
+  change the bank order forgets what was already delivered and every
+  encounter is owed a first frame again
+- PatchCore bundles, and CLIP bundles built before the threshold was
+  added, carry no detection threshold; with those the bank sends by
+  priority alone
+- The demo stamps frames with replay times, not the dataset's, so a replay faster than one
+  frame every few seconds puts all its detections in one encounter
 - An empty frame above the detection threshold within 10 s of two
   encounters joins them into one, so a low threshold merges encounters; the
   sparse streams, with several crops per moment, do this more than a real

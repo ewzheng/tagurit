@@ -249,6 +249,23 @@ class TileTerms:
     scores: np.ndarray
 
 
+@dataclass(frozen=True, eq=False)
+class KeptTiles:
+    """
+    What a backlog holds to rescore one frame under a new query, without its image.
+
+    About 25 KB for a 24-tile frame: the embeddings are stored in half
+    precision, which moves a raw score far too little to reorder frames.
+
+    Parameters:
+        - embeddings (np.ndarray): (tiles, dim) unit tile embeddings, float16
+        - novelty_p (np.ndarray): (tiles,) the novelty percentiles the tiles had on arrival, float32
+    """
+
+    embeddings: np.ndarray
+    novelty_p: np.ndarray
+
+
 def combine(query_z: np.ndarray, novelty_p: np.ndarray) -> np.ndarray:
     """
     A tile's raw score: the mean of its query and novelty percentiles, kept apart at the top.
@@ -547,6 +564,49 @@ class ClipScorer:
         Return: one raw score per tile, in the order given
         """
         return self.terms(self.embed(tiles), timestamp).scores.tolist()
+
+    def score_and_keep(
+        self, tiles: Sequence[np.ndarray], timestamp: float
+    ) -> tuple[list[float], KeptTiles]:
+        """
+        Score one frame's tiles as ``score_frame`` does, and return what rescoring it needs.
+
+        Parameters:
+            - tiles (Sequence[np.ndarray]): uint8 RGB square tiles of one frame
+            - timestamp (float): the frame's capture time in seconds
+
+        Return: one raw score per tile in the order given, and the frame's kept tiles
+        """
+        terms = self.terms(self.embed(tiles), timestamp)
+        kept = KeptTiles(terms.embeddings.astype(np.float16), terms.novelty_p.astype(np.float32))
+        return terms.scores.tolist(), kept
+
+    def rescore(self, kept: Sequence[KeptTiles]) -> list[float]:
+        """
+        Raw frame scores under the current query for frames scored earlier.
+
+        One matrix product over every kept tile (``retarget``); a frame's
+        score is its tiles' maximum, with the novelty each tile had on
+        arrival. Call ``set_targets`` first to rescore for a new query. A
+        frame with no tiles RAISES ValueError.
+
+        Parameters:
+            - kept (Sequence[KeptTiles]): what ``score_and_keep`` returned, one per frame
+
+        Return: one raw score per frame, in the order given
+        """
+        if not kept:
+            return []
+        counts = [len(frame.embeddings) for frame in kept]
+        if min(counts) == 0:
+            raise ValueError("a kept frame has no tiles")
+        scores = retarget(
+            np.concatenate([frame.embeddings for frame in kept]).astype(np.float32),
+            np.concatenate([frame.novelty_p for frame in kept]),
+            self.query,
+        )
+        starts = np.cumsum([0, *counts[:-1]])
+        return np.maximum.reduceat(scores, starts).tolist()
 
     def terms(self, embeddings: np.ndarray, timestamp: float) -> TileTerms:
         """

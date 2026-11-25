@@ -28,6 +28,7 @@ FRAME_ID = re.compile(r"\bFrame (\d+)\b")
 SIZE = (1280, 720)
 PREVIEW = (840, 430)
 THUMB = (192, 108)
+BANK_SHOWN = 8
 STATE_COLOURS = {
     "CONNECTED": (60, 160, 60),
     "DISCONNECTED": (50, 50, 200),
@@ -77,6 +78,7 @@ class Tracker:
         - sending (int | None): the frame submitted most recently, kept after its
           receipt until the next submission
         - sending_from (str | None): the queue, "live" or "bank", ``sending`` came from
+        - bank_head (list[int]): the next banked frames in the scheduler's send order
     """
 
     lanes: dict[int, str] = field(default_factory=dict)
@@ -84,6 +86,7 @@ class Tracker:
     state: str = "STARTING"
     sending: int | None = None
     sending_from: str | None = None
+    bank_head: list[int] = field(default_factory=list)
 
     def update(self, event: str, detail: str, scheduler: FrameScheduler) -> None:
         """
@@ -92,11 +95,12 @@ class Tracker:
         Parameters:
             - event (str): the event name, e.g. "ARRIVE"
             - detail (str): the event's text as the client wrote it
-            - scheduler (FrameScheduler): read for its state only
+            - scheduler (FrameScheduler): read for its state and the head of its bank
 
         Return: void
         """
         self.state = scheduler.state.value
+        self.bank_head = scheduler.stored_order(BANK_SHOWN)
         if event == "ARRIVE" and (match := ARRIVE.search(detail)):
             self.lanes[int(match.group(1))] = match.group(2)
         elif event == "MIGRATE" and (match := MIGRATE.search(detail)):
@@ -173,7 +177,7 @@ def render(
     Draw the dashboard.
 
     The latest frame fills the left with its best tile outlined. The right
-    column shows the bank in send order, highest priority first, and the
+    column shows the bank in the scheduler's send order, and the
     bottom strip the live queue in send order, oldest on the left. The frame
     sent most recently leads the queue it was taken from, ringed in red,
     until the next is sent: a local receipt returns well within one redraw,
@@ -189,9 +193,9 @@ def render(
     Return: BGR image of size ``SIZE``
     """
     canvas = np.full((SIZE[1], SIZE[0], 3), BACKGROUND, dtype=np.uint8)
-    bank = sorted(
-        (f for f in tracker.in_lane("bank") if f in views), key=lambda f: -views[f].priority
-    )
+    waiting = {f for f in tracker.in_lane("bank") if f in views}
+    bank = [f for f in tracker.bank_head if f in waiting]
+    bank += sorted(waiting - set(bank), key=lambda f: -views[f].priority)
 
     colour = STATE_COLOURS.get(tracker.state, EMPTY_COLOUR)
     cv2.rectangle(canvas, (0, 0), (SIZE[0], 44), colour, -1)
@@ -231,11 +235,11 @@ def render(
         lead[tracker.sending_from].append(tracker.sending)
     bank_column = lead["bank"] + bank
     _text(canvas, "bank, next to send", (870, 74), 0.6, 1)
-    for i, frame_id in enumerate(bank_column[:8]):
+    for i, frame_id in enumerate(bank_column[:BANK_SHOWN]):
         at = (870 + (i % 2) * 204, 86 + (i // 2) * 136)
         _thumbnail(canvas, views[frame_id], at, frame_id == tracker.sending)
-    if len(bank_column) > 8:
-        _text(canvas, f"+{len(bank_column) - 8} more", (870, 640), 0.55, 1)
+    if len(bank_column) > BANK_SHOWN:
+        _text(canvas, f"+{len(bank_column) - BANK_SHOWN} more", (870, 640), 0.55, 1)
 
     live = [f for f in tracker.in_lane("live") if f in views]
     live_strip = lead["live"] + live

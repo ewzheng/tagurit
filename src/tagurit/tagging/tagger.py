@@ -7,7 +7,11 @@ unusual tile, because one swimmer in one tile is the whole reason to keep
 the frame. The tagger works with any ``model.scorer.TileScorer`` and never
 learns which model is behind it. A ``model.scorer.WindowedTileScorer`` also
 gets each frame's capture time, since its scores depend on the frames just
-before; such a tagger must be fed frames in capture order.
+before; such a tagger must be fed frames in capture order. With a
+``model.scorer.RetargetableTileScorer`` each tagged frame also carries what
+the scorer kept of it, so ``set_targets`` can change the query mid-mission
+and ``rescore`` can give frames still waiting in the client a priority
+under it, without their images.
 
 Scoring is blocking compute. Called directly from the client's asyncio
 loop it would stall Gabriel transport, so call it through
@@ -16,9 +20,10 @@ loop it would stall Gabriel transport, so call it through
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from tagurit.model.scorer import TileScorer, WindowedTileScorer
+from tagurit.model.scorer import RetargetableTileScorer, TileScorer, WindowedTileScorer
 from tagurit.model.tiling import Tile, crop_tiles, decode_image, tile_grid
 from tagurit.protocol import ImageFrame
 from tagurit.tagging.priority import PriorityScale
@@ -34,12 +39,14 @@ class FrameScore:
         - raw_score (float): highest raw tile score, the value that was mapped
         - tiles (tuple[Tile, ...]): the tile grid, row-major
         - tile_scores (tuple[float, ...]): raw score per tile, same order as ``tiles``
+        - kept (object | None): what a retargetable scorer kept to rescore the frame, else None
     """
 
     priority: float
     raw_score: float
     tiles: tuple[Tile, ...]
     tile_scores: tuple[float, ...]
+    kept: object | None = None
 
 
 class Tagger:
@@ -95,7 +102,11 @@ class Tagger:
         height, width = image.shape[:2]
         tiles = tile_grid(width, height, self.tile_size)
         crops = crop_tiles(image, tiles)
-        if timestamp is not None and isinstance(self.scorer, WindowedTileScorer):
+        kept = None
+        if timestamp is not None and isinstance(self.scorer, RetargetableTileScorer):
+            scores, kept = self.scorer.score_and_keep(crops, timestamp)
+            tile_scores = tuple(scores)
+        elif timestamp is not None and isinstance(self.scorer, WindowedTileScorer):
             tile_scores = tuple(self.scorer.score_frame(crops, timestamp))
         else:
             tile_scores = tuple(self.scorer.score_tiles(crops))
@@ -107,6 +118,7 @@ class Tagger:
             raw_score=raw_score,
             tiles=tiles,
             tile_scores=tile_scores,
+            kept=kept,
         )
 
     def tag(self, frame_id: int, timestamp: float, image_bytes: bytes) -> ImageFrame:
@@ -120,14 +132,61 @@ class Tagger:
             - timestamp (float): capture time in seconds since the Unix epoch
             - image_bytes (bytes): encoded image, e.g. JPEG
 
-        Return: an ImageFrame carrying the frame's priority
+        Return: an ImageFrame carrying the frame's priority and what the scorer kept of it
         """
+        score = self.score(image_bytes, timestamp)
         return ImageFrame(
             frame_id=frame_id,
             timestamp=timestamp,
             image_bytes=image_bytes,
-            priority=self.score(image_bytes, timestamp).priority,
+            priority=score.priority,
+            kept=score.kept,
         )
+
+    def set_targets(self, phrases: Sequence[str]) -> None:
+        """
+        Switch the query for every frame tagged from now on.
+
+        The priority scale and detection threshold stay as calibrated. A
+        scorer that cannot change its query RAISES TypeError.
+
+        Parameters:
+            - phrases (Sequence[str]): the new query phrases
+
+        Return: void
+        """
+        self._retargetable().set_targets(phrases)
+
+    def rescore(self, frames: Sequence[ImageFrame]) -> dict[int, float]:
+        """
+        Priorities under the current query for frames tagged earlier.
+
+        Uses what each frame carries in ``kept``; frames without it are left
+        out, so they keep the priority they have. A scorer that cannot
+        rescore RAISES TypeError.
+
+        Parameters:
+            - frames (Sequence[ImageFrame]): frames this tagger tagged
+
+        Return: frame ID to new priority, for the frames that could be rescored
+        """
+        scorer = self._retargetable()
+        known = [frame for frame in frames if frame.kept is not None]
+        raw_scores = scorer.rescore([frame.kept for frame in known])
+        return {
+            frame.frame_id: self.scale.priority(raw)
+            for frame, raw in zip(known, raw_scores, strict=True)
+        }
+
+    def _retargetable(self) -> RetargetableTileScorer:
+        """
+        The scorer, if its query can change; otherwise RAISES TypeError.
+
+        Return: the scorer
+        """
+        if not isinstance(self.scorer, RetargetableTileScorer):
+            raise TypeError(f"{type(self.scorer).__name__} cannot change its query")
+        return self.scorer
 
     def reset(self) -> None:
         """

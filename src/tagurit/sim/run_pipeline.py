@@ -15,6 +15,18 @@ every Nth frame without a target, raising the share of targets so they come
 up often enough to watch. ``tagurit.orchestrator`` tags each frame and runs the client, which
 sends over Gabriel to the receiver at ``client.config.GABRIEL_ENDPOINT``.
 
+Frames are released on a camera's schedule whether or not the tagger keeps
+up: one that arrives while the tagger is still busy with an older one
+replaces any frame already waiting, and ``--min-interval`` also drops
+frames captured too soon after the last one tagged. ``--no-drop-stale``
+tags every frame instead and slows the replay down to the tagger. When the
+bundle has a detection threshold the bank sends in ``tagging.order``'s
+order: detections first, one frame per encounter per pass, newest
+encounter first. ``--bank-order score`` keeps highest priority first.
+``--retarget "a boat" --retarget-after 30`` changes the mission 30 seconds
+in: the tagger switches to the new query phrases and the frames still
+waiting in the client are rescored for it from their kept tile embeddings.
+
 The console shows the client's events and queue sizes as ``sim.run_client``
 does, with each frame's priority and, from the dataset's labels, whether it
 really holds a target. A window shows the same as pictures
@@ -23,14 +35,16 @@ priority, and the bank and live queue in send order, the latest frame sent
 ringed in red at the head of the queue it came from.
 ``--video PATH`` also writes that view to an MP4, and ``--no-view`` turns the
 window off for headless runs. Press q or Esc in the window to stop. Cut the
-network to watch tagged frames bank up; restore it to watch the bank drain
-highest priority first. Needs the ``model`` extra and a running receiver.
+network to watch tagged frames bank up; restore it to watch the bank
+drain. Needs the ``model`` extra and a running receiver.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
+import functools
 import json
 import os
 import re
@@ -46,6 +60,7 @@ import numpy as np
 from tagurit import orchestrator
 from tagurit.client.config import GABRIEL_ENDPOINT
 from tagurit.client.frame_scheduler import FrameScheduler
+from tagurit.client.scheduler_datatypes import BankOrder
 from tagurit.protocol import ImageFrame
 from tagurit.sim import dataloader
 from tagurit.sim.config import FRAME_INTERVAL_SECONDS
@@ -61,6 +76,7 @@ from tagurit.sim.pipeline_view import (
 from tagurit.sim.run_client import queue_display
 from tagurit.sim.trace import TraceFrame
 from tagurit.tagging import Tagger, load_bundle
+from tagurit.tagging.order import next_frame
 
 FIT_RECORD = "fit.json"
 FRAME_ID = re.compile(r"\bFrame (\d+)\b")
@@ -110,7 +126,34 @@ class Recorder:
         )
         self.latest = (frame_id, fit(image, PREVIEW))
         self.priorities[frame_id] = result.priority
-        return ImageFrame(frame_id, timestamp, image_bytes, result.priority)
+        return ImageFrame(frame_id, timestamp, image_bytes, result.priority, result.kept)
+
+    def set_targets(self, phrases: Sequence[str]) -> None:
+        """
+        Switch the tagger's query.
+
+        Parameters:
+            - phrases (Sequence[str]): the new query phrases
+
+        Return: void
+        """
+        self._tagger.set_targets(phrases)
+
+    def rescore(self, frames: Sequence[ImageFrame]) -> dict[int, float]:
+        """
+        Rescore frames under the current query and record their new priorities.
+
+        Parameters:
+            - frames (Sequence[ImageFrame]): frames this recorder tagged
+
+        Return: frame ID to new priority
+        """
+        priorities = self._tagger.rescore(frames)
+        for frame_id, priority in priorities.items():
+            self.priorities[frame_id] = priority
+            if frame_id in self.views:
+                self.views[frame_id] = dataclasses.replace(self.views[frame_id], priority=priority)
+        return priorities
 
 
 def select_frames(
@@ -158,6 +201,20 @@ def select_frames(
                     frames.append(frame)
                 empties += 1
     return frames
+
+
+async def change_mission(phrases: Sequence[str], after: float) -> AsyncIterator[Sequence[str]]:
+    """
+    One mission change: the new query phrases, ``after`` seconds from now.
+
+    Parameters:
+        - phrases (Sequence[str]): the new mission's query phrases
+        - after (float): seconds to wait first
+
+    Return: asynchronous iterator that yields the phrases once
+    """
+    await asyncio.sleep(after)
+    yield tuple(phrases)
 
 
 async def replay(frames: Sequence[TraceFrame], interval: float) -> AsyncIterator[bytes]:
@@ -273,6 +330,10 @@ async def run_demo(
     targets: dict[int, bool | None],
     window: bool,
     video: cv2.VideoWriter | None,
+    drop_stale: bool = True,
+    min_interval: float = 0.0,
+    bank_order: BankOrder | None = None,
+    missions: AsyncIterator[Sequence[str]] | None = None,
 ) -> np.ndarray:
     """
     Run the pipeline with the console, and the dashboard when asked for.
@@ -289,6 +350,10 @@ async def run_demo(
         - targets (dict[int, bool | None]): frame ID to ground truth
         - window (bool): show a window
         - video (cv2.VideoWriter | None): write the dashboard here as well
+        - drop_stale (bool): keep only the newest frame waiting for the tagger
+        - min_interval (float): least seconds between the capture times of tagged frames
+        - bank_order (BankOrder | None): picks the banked frame to send next; None is by priority
+        - missions (AsyncIterator[Sequence[str]] | None): query phrases of each new mission
 
     Return: the final dashboard image
     """
@@ -296,8 +361,19 @@ async def run_demo(
     tracker = Tracker()
     quit_requested = asyncio.Event()
     report = console(recorder.priorities, targets, tracker, start)
+    dropped: list[int] = []
     pipeline = asyncio.create_task(
-        orchestrator.run(replay(frames, interval), recorder, report, send_interval)
+        orchestrator.run(
+            replay(frames, interval),
+            recorder,
+            report,
+            send_interval,
+            drop_stale=drop_stale,
+            min_interval=min_interval,
+            dropped=dropped.append,
+            bank_order=bank_order,
+            missions=missions,
+        )
     )
     drawer = None
     if window or video is not None:
@@ -321,6 +397,8 @@ async def run_demo(
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if dropped:
+            print(f"\nDropped {len(dropped)} of {len(frames)} frames before tagging", flush=True)
     return render(tracker, recorder.views, recorder.latest, time.monotonic() - start)
 
 
@@ -345,6 +423,25 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--send-interval", type=float, default=SEND_INTERVAL, help="minimum seconds between sends"
     )
+    parser.add_argument(
+        "--drop-stale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="drop frames that wait while the tagger is busy (default); --no-drop-stale tags all",
+    )
+    parser.add_argument(
+        "--min-interval", type=float, default=0.0, help="least seconds between tagged frames"
+    )
+    parser.add_argument(
+        "--bank-order",
+        choices=["encounters", "score"],
+        default="encounters",
+        help="how the bank picks its next frame; encounters needs a bundle with a threshold",
+    )
+    parser.add_argument("--retarget", nargs="+", help="new query phrases for a mission change")
+    parser.add_argument(
+        "--retarget-after", type=float, default=30.0, help="seconds before the mission change"
+    )
     parser.add_argument("--limit", type=int, help="replay at most this many frames")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument(
@@ -354,6 +451,12 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if args.empty_stride <= 0 or args.interval < 0 or args.send_interval < 0:
         parser.error("--empty-stride must be positive, --interval and --send-interval non-negative")
+    if args.drop_stale and args.interval == 0:
+        parser.error("--interval 0 releases frames without pause; it needs --no-drop-stale")
+    if args.min_interval < 0 or (args.min_interval > 0 and not args.drop_stale):
+        parser.error("--min-interval must be non-negative and needs --drop-stale")
+    if args.retarget_after < 0:
+        parser.error("--retarget-after must be non-negative")
 
     record_path = args.bundle / FIT_RECORD
     record = json.loads(record_path.read_text()) if record_path.is_file() else None
@@ -372,6 +475,12 @@ def main(argv: list[str] | None = None) -> None:
     started = time.perf_counter()
     tagger = load_bundle(args.bundle, device=args.device)
     print(f"Loaded tagger from {args.bundle} in {time.perf_counter() - started:.1f}s", flush=True)
+    bank_order = None
+    if args.bank_order == "encounters" and tagger.detection is not None:
+        bank_order = functools.partial(next_frame, threshold=tagger.detection)
+        print(f"Bank sends by encounter; detections from priority {tagger.detection:.3f}")
+    else:
+        print("Bank sends highest priority first", flush=True)
     print(
         f"Sending to {GABRIEL_ENDPOINT}; start the receiver first: "
         "uv run python3 -m tagurit.cloudlet.image_receiver",
@@ -390,9 +499,28 @@ def main(argv: list[str] | None = None) -> None:
             parser.error(f"could not open {args.video} for writing")
 
     recorder = Recorder(tagger, targets)
+    missions = None
+    if args.retarget:
+        missions = change_mission(args.retarget, args.retarget_after)
+        print(
+            f"Mission changes to {', '.join(args.retarget)} after {args.retarget_after:g}s",
+            flush=True,
+        )
     try:
         final = asyncio.run(
-            run_demo(frames, args.interval, args.send_interval, recorder, targets, args.view, video)
+            run_demo(
+                frames,
+                args.interval,
+                args.send_interval,
+                recorder,
+                targets,
+                args.view,
+                video,
+                args.drop_stale,
+                args.min_interval,
+                bank_order,
+                missions,
+            )
         )
     except KeyboardInterrupt:
         print("\nPipeline stopped")

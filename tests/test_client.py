@@ -2,11 +2,14 @@
 Check priority ordering, arbitration, retention and disconnected migration
 """
 
+from functools import partial
+
 import pytest
 
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.scheduler_datatypes import SchedulerState
 from tagurit.protocol import ImageFrame
+from tagurit.tagging.order import next_frame
 
 
 # ============================================================
@@ -503,3 +506,206 @@ def test_live_migration() -> None:
     check_late_poll()
     check_no_migration_while_reintegrating()
     check_interval_setting()
+
+
+# ============================================================
+# Supplied bank order tests
+# ============================================================
+
+
+# Create a frame with its own capture time
+def _make_timed_frame(frame_id: int, timestamp: float, priority: float) -> ImageFrame:
+    return ImageFrame(
+        frame_id=frame_id,
+        timestamp=timestamp,
+        image_bytes=b"test image bytes",
+        priority=priority
+    )
+
+
+# Bank frames during an outage and return the reconnected scheduler
+def _banked(frames: list[ImageFrame], **options: object) -> FrameScheduler:
+    scheduler = FrameScheduler(**options)
+    scheduler.set_connected(False)
+
+    for frame in frames:
+        scheduler.add_frame(frame)
+
+    scheduler.set_connected(True)
+    return scheduler
+
+
+# Check banked frames follow a supplied order instead of the score
+def test_bank_order() -> None:
+    """
+    Check encounter ordering, delivered-frame history, previews and bad orders
+
+    Return:
+        void
+    """
+    by_encounter = partial(next_frame, threshold=0.50)
+
+    # An old sighting, a recent one seen twice and an empty frame
+    def sightings() -> list[ImageFrame]:
+        return [
+            _make_timed_frame(1, 300.0, 0.90),
+            _make_timed_frame(2, 3000.0, 0.70),
+            _make_timed_frame(3, 3008.0, 0.80),
+            _make_timed_frame(4, 3540.0, 0.30)
+        ]
+
+    # Without an order the bank must keep sending the highest score first
+    def check_default_is_score_order() -> None:
+        scheduler = _banked(sightings())
+
+        assert scheduler.stored_order(10) == [1, 3, 2, 4]
+        assert [_pop_id(scheduler) for _ in range(4)] == [1, 3, 2, 4]
+
+    # The newest encounter goes first and its repeat waits for the old sighting
+    def check_encounter_order() -> None:
+        scheduler = _banked(sightings(), bank_order=by_encounter)
+
+        assert [_pop_id(scheduler) for _ in range(4)] == [3, 1, 2, 4]
+        assert scheduler.state == SchedulerState.CONNECTED
+
+    # A preview must show the same order without removing anything
+    def check_preview_changes_nothing() -> None:
+        scheduler = _banked(sightings(), bank_order=by_encounter)
+
+        assert scheduler.stored_order(2) == [3, 1]
+        assert scheduler.stored_order(10) == [3, 1, 2, 4]
+        assert scheduler.stored_count() == 4
+        assert [_pop_id(scheduler) for _ in range(4)] == [3, 1, 2, 4]
+
+    # A frame already delivered live must count toward its encounter
+    def check_live_delivery_counts() -> None:
+        scheduler = FrameScheduler(bank_order=by_encounter)
+        scheduler.add_frame(_make_timed_frame(1, 0.0, 0.90))
+        assert _pop_id(scheduler) == 1
+
+        scheduler.set_connected(False)
+        scheduler.add_frame(_make_timed_frame(2, 5.0, 0.80))
+        scheduler.add_frame(_make_timed_frame(3, 100.0, 0.60))
+        scheduler.set_connected(True)
+
+        # Frame 2 repeats the delivered encounter so the newer sighting goes first
+        assert [_pop_id(scheduler) for _ in range(2)] == [3, 2]
+
+    # Live turns must still alternate with the supplied order while reintegrating
+    def check_reintegration_turns() -> None:
+        scheduler = _banked(sightings(), live_weight=1, stored_weight=1, bank_order=by_encounter)
+        scheduler.add_frame(_make_timed_frame(5, 4000.0, 0.10))
+        scheduler.add_frame(_make_timed_frame(6, 4001.0, 0.10))
+
+        assert [_pop_id(scheduler) for _ in range(6)] == [5, 3, 6, 1, 2, 4]
+
+    # An order that names no waiting frame must be rejected
+    def check_bad_orders() -> None:
+        for answer in [None, 4, -1]:
+            scheduler = _banked(sightings(), bank_order=lambda times, scores, sent: answer)
+
+            with pytest.raises(ValueError):
+                scheduler.pop_next_frame()
+
+    check_default_is_score_order()
+    check_encounter_order()
+    check_preview_changes_nothing()
+    check_live_delivery_counts()
+    check_reintegration_turns()
+    check_bad_orders()
+
+
+# ============================================================
+# Rescoring tests
+# ============================================================
+
+
+# Check waiting frames can be rescored after the query changes
+def test_rescoring() -> None:
+    """
+    Check waiting-frame listing, score replacement, history reset and bad scores
+
+    Return:
+        void
+    """
+    by_encounter = partial(next_frame, threshold=0.50)
+
+    # Waiting frames must be listed from both queues without the in-flight frame
+    def check_waiting_frames() -> None:
+        scheduler = FrameScheduler()
+        scheduler.add_frame(_make_frame(1, 0.20))
+        scheduler.add_frame(_make_frame(2, 0.30))
+        scheduler.set_connected(False)
+        scheduler.add_frame(_make_frame(3, 0.90))
+        scheduler.set_connected(True)
+
+        assert scheduler.reserve_next_frame().frame_id == 1
+        assert [frame.frame_id for frame in scheduler.waiting_frames()] == [2, 3]
+
+    # New scores must reorder the bank and keep contents and arrival order
+    def check_bank_reorders() -> None:
+        scheduler = _banked([_make_frame(1, 0.90), _make_frame(2, 0.50), _make_frame(3, 0.10)])
+
+        assert scheduler.reprioritize({1: 0.20, 3: 0.80, 99: 0.70}) == 2
+        assert [frame.priority for frame in scheduler.waiting_frames()] == [0.20, 0.50, 0.80]
+        assert scheduler.waiting_frames()[0].image_bytes == b"test image bytes"
+        assert [_pop_id(scheduler) for _ in range(3)] == [3, 2, 1]
+
+    # Live frames must carry their new score into the bank
+    def check_live_frames_are_rescored() -> None:
+        now = 0.0
+        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler.add_frame(_make_frame(1, 0.10))
+        scheduler.add_frame(_make_frame(2, 0.20))
+        assert scheduler.reprioritize({1: 0.95}) == 1
+
+        scheduler.set_connected(False)
+        now = 5.0
+        assert scheduler.migrate_live_frame().priority == 0.95
+        assert scheduler.live_count() == 1
+
+    # The in-flight frame must keep its score and still be acknowledged
+    def check_inflight_is_untouched() -> None:
+        scheduler = FrameScheduler()
+        scheduler.add_frame(_make_frame(1, 0.10))
+        frame = scheduler.reserve_next_frame()
+
+        assert scheduler.reprioritize({1: 0.90}) == 0
+        assert frame.priority == 0.10
+        scheduler.acknowledge_frame(1)
+        assert scheduler.pending_count() == 0
+
+    # Delivered frames scored under the old query must stop counting toward encounters
+    def check_history_is_cleared() -> None:
+        scheduler = FrameScheduler(bank_order=by_encounter)
+        scheduler.add_frame(_make_timed_frame(1, 0.0, 0.90))
+        assert _pop_id(scheduler) == 1
+
+        scheduler.set_connected(False)
+        scheduler.add_frame(_make_timed_frame(2, 5.0, 0.80))
+        scheduler.add_frame(_make_timed_frame(3, 100.0, 0.60))
+        scheduler.set_connected(True)
+
+        # Frame 2 repeats the delivered encounter so the newer sighting goes first
+        assert scheduler.stored_order(2) == [3, 2]
+
+        # The new query puts frame 3 below the threshold and forgets the old delivery
+        scheduler.reprioritize({2: 0.80, 3: 0.40})
+        assert scheduler.stored_order(2) == [2, 3]
+
+    # A bad score must be rejected without changing either queue
+    def check_bad_score_changes_nothing() -> None:
+        scheduler = _banked([_make_frame(1, 0.90), _make_frame(2, 0.50)])
+
+        with pytest.raises(ValueError):
+            scheduler.reprioritize({1: 0.20, 2: 1.50})
+
+        assert [frame.priority for frame in scheduler.waiting_frames()] == [0.90, 0.50]
+
+    check_waiting_frames()
+    check_bank_reorders()
+    check_live_frames_are_rescored()
+    check_inflight_is_untouched()
+    check_history_is_cleared()
+    check_bad_score_changes_nothing()
+

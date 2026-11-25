@@ -252,6 +252,29 @@ def test_bad_tiles_and_configs_are_rejected() -> None:
         make_scorer(reference=np.ones((3, 5), dtype=np.float32))
 
 
+def test_kept_tiles_rescore_frames_under_the_same_and_a_new_query() -> None:
+    scorer, twin = make_scorer(), make_scorer()
+    kept, firsts = [], []
+    for i in range(4):
+        frame = tiles(3, seed=10 + i)
+        scores, state = scorer.score_and_keep(frame, timestamp=float(i))
+        assert scores == twin.score_frame(frame, timestamp=float(i))  # same scoring, same memory
+        assert state.embeddings.dtype == np.float16 and state.embeddings.shape == (3, 16)
+        kept.append(state)
+        firsts.append(max(scores))
+    # Half-precision embeddings move a raw score only slightly.
+    assert scorer.rescore(kept) == pytest.approx(firsts, rel=1e-2)
+    assert scorer.rescore([]) == []
+
+    scorer.set_targets(["a car"])
+    expected = [
+        retarget(state.embeddings.astype(np.float32), state.novelty_p, scorer.query).max()
+        for state in kept
+    ]
+    assert scorer.rescore(kept) == pytest.approx(expected)
+    assert scorer.rescore(kept) != pytest.approx(firsts, rel=1e-2)  # the new query reorders
+
+
 def test_bundle_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     scorer = make_scorer()
     save_clip_bundle(tmp_path, scorer, PriorityScale(reference=0.3), tile_size=224)

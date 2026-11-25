@@ -91,7 +91,7 @@ def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.M
     cancelled = []
 
     async def endless_pipeline(
-        images: object, tagger: object, report: object, send_interval: float
+        images: object, tagger: object, report: object, send_interval: float, **options: object
     ) -> None:
         try:
             await asyncio.Event().wait()
