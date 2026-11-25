@@ -31,12 +31,17 @@ On the Jetson (JetPack 6), `make sync-jetson` installs Python 3.10 with the
 - `scripts/` — dev helpers
 - `.llm/` — shared context for coding agents
 
-The client currently sends one independently decodable H.264 frame per image
-using software encoding at CRF 32. It retains the original JPEG in the
+The client sends one independently decodable H.264 frame per image.
+`--encoder auto` probes the Jetson hardware encoder at startup and uses QP 29
+when it works; otherwise it uses software encoding at CRF 32. `--encoder software`
+forces the portable path, and `--encoder hardware` requires the Jetson encoder
+or exits with an error. The selected backend is printed as an `ENCODER` event.
+The client retains the original JPEG in the
 scheduler and the encoded wire payload until a matching receipt arrives.
 `src/tagurit/client/config.py` holds the codec and CRF settings. The cloudlet
-decodes H.264 before acknowledging it. Jetson hardware encoding is still a
-separate backend to implement and measure on the device.
+decodes H.264 before acknowledging it. The hardware backend keeps a GStreamer
+pipeline alive across images of the same dimensions and rebuilds it when the
+dimensions change. It uses JetPack's system PyGObject bindings on the Jetson.
 
 ## Lossless H.264 size experiment
 

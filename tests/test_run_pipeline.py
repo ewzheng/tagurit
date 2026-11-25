@@ -135,9 +135,12 @@ def test_cli_passes_adaptive_mode_and_event_log(tmp_path, monkeypatch) -> None:
             "1",
             "--no-view",
             "--adaptive-window",
+            "--encoder",
+            "software",
             "--events",
             str(event_path),
         ]
     )
     assert options[0]["adaptive_window"] is True
+    assert options[0]["encoder"] == "software"
     assert "window_change" in event_path.read_text()

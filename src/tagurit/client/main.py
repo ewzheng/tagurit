@@ -16,7 +16,8 @@ from tagurit.client.adaptive_window import (
     AdaptiveWindowController,
     WindowDecision,
 )
-from tagurit.client.config import INFLIGHT_WINDOW, LOOP_INTERVAL_SECONDS
+from tagurit.client.config import IMAGE_CODEC, INFLIGHT_WINDOW, LOOP_INTERVAL_SECONDS, VIDEO_CRF
+from tagurit.client.encoder_selection import select_encoder
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.gabriel_transport import GabrielTransport
 from tagurit.client.rolling_metrics import RollingSnapshot
@@ -32,6 +33,7 @@ async def run_client(
     *,
     window_size: int | None = None,
     adaptive_window: bool = False,
+    encoder: str = "auto",
     send_interval: float | None = None,
     endpoint: str | None = None,
     event_log: EventLog | None = None,
@@ -52,6 +54,7 @@ async def run_client(
         - window_size (int | None): Initial limit; None uses four in adaptive mode
           and the configured fixed limit otherwise
         - adaptive_window (bool): Adjust the client limit from recent receipts
+        - encoder (str): auto, software, or hardware H.264 encoding backend
         - send_interval (float | None): Minimum seconds between submissions; None uses config
         - endpoint (str | None): Gabriel URL override; None uses config
         - event_log (EventLog | None): Optional caller-owned CSV recorder
@@ -69,6 +72,7 @@ async def run_client(
     if window_size is None:
         window_size = INITIAL_WINDOW if adaptive_window else INFLIGHT_WINDOW
     scheduler = FrameScheduler(window_size=window_size)
+    selected_encoder = select_encoder(encoder, IMAGE_CODEC, VIDEO_CRF)
     controller = (
         AdaptiveWindowController(time.monotonic(), metrics_window_seconds, window_size)
         if adaptive_window
@@ -110,6 +114,7 @@ async def run_client(
         scheduler,
         session_id,
         report_event,
+        video_encoder=selected_encoder,
         send_interval=send_interval,
         event_log=event_log,
         metrics_window_seconds=metrics_window_seconds,
@@ -190,6 +195,7 @@ async def run_client(
     if event_log is not None:
         event_log.record("start", session_id)
     report_event("START", f"Session {session_id} | Actual transport health controls connectivity")
+    report_event("ENCODER", selected_encoder.description())
     if controller is not None:
         if event_log is not None:
             event_log.record(
@@ -223,6 +229,7 @@ async def run_client(
             task.cancel()
 
         await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.to_thread(selected_encoder.close)
 
         report_metrics()
 

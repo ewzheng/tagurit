@@ -96,4 +96,4 @@ def test_run_hands_tagged_frames_to_the_client(monkeypatch: pytest.MonkeyPatch) 
     )
     assert [(f.frame_id, f.priority) for f in received] == [(1, 0.2), (2, 0.1)]
     assert reports == [report]
-    assert options == [{"adaptive_window": True, "event_log": None}]
+    assert options == [{"adaptive_window": True, "encoder": "auto", "event_log": None}]
