@@ -42,7 +42,7 @@ def test_h264_odd_dimensions_and_retry() -> None:
 
     async def transmit_twice():
         first = await transport._produce(1)
-        transport._submitted_at = None  # Simulate a lost receipt before reconnection.
+        transport._pending[1].submitted_at = None  # Simulate a lost receipt before reconnection.
         transport._active_attempt = 2
         second = await transport._produce(2)
         return first, second

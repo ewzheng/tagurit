@@ -11,7 +11,6 @@ from tagurit.client.scheduler_datatypes import SchedulerState
 from tagurit.protocol import ImageFrame
 from tagurit.tagging.order import next_frame
 
-
 # ============================================================
 # Shared test helpers
 # ============================================================
@@ -20,10 +19,7 @@ from tagurit.tagging.order import next_frame
 # Create a small frame without reading an image file
 def _make_frame(frame_id: int, priority: float = 0.50) -> ImageFrame:
     return ImageFrame(
-        frame_id=frame_id,
-        timestamp=0.0,
-        image_bytes=b"test image bytes",
-        priority=priority
+        frame_id=frame_id, timestamp=0.0, image_bytes=b"test image bytes", priority=priority
     )
 
 
@@ -50,14 +46,18 @@ def test_priority_bank() -> None:
 
     # Empty queues must have nothing to send
     def check_empty_bank() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
 
         assert scheduler.pending_count() == 0
         assert scheduler.pop_next_frame() is None
 
     # A stored frame must remain until communication resumes
     def check_store_and_remove() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         frame = _make_frame(1, 0.50)
 
         scheduler.set_connected(False)
@@ -75,7 +75,9 @@ def test_priority_bank() -> None:
 
     # Higher scores must leave the bank first
     def check_priority_order() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         scheduler.set_connected(False)
 
         for frame_id, priority in [(1, 0.20), (2, 1.00), (3, 0.50), (4, 0.00)]:
@@ -88,7 +90,9 @@ def test_priority_bank() -> None:
 
     # Equal scores must use arrival order rather than frame ID
     def check_equal_priorities() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         scheduler.set_connected(False)
 
         for frame_id in [30, 10, 20]:
@@ -100,7 +104,9 @@ def test_priority_bank() -> None:
 
     # A later outage can add work to a partly drained bank
     def check_add_after_removal() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         scheduler.set_connected(False)
         scheduler.add_frame(_make_frame(1, 0.20))
         scheduler.add_frame(_make_frame(2, 0.50))
@@ -144,7 +150,9 @@ def test_scheduler_modes() -> None:
 
     # Connected mode must serve live frames in arrival order
     def check_connected_order() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         scheduler.add_frame(_make_frame(1, 0.50))
         scheduler.add_frame(_make_frame(2, 0.90))
 
@@ -154,7 +162,7 @@ def test_scheduler_modes() -> None:
 
     # Reintegration must follow the configured two-to-one ratio
     def check_reintegration_order() -> None:
-        scheduler = FrameScheduler(live_weight=2, stored_weight=1)
+        scheduler = FrameScheduler(window_size=1, live_weight=2, stored_weight=1)
         scheduler.set_connected(False)
         scheduler.add_frame(_make_frame(1, 0.20))
         scheduler.add_frame(_make_frame(2, 0.90))
@@ -177,7 +185,7 @@ def test_scheduler_modes() -> None:
 
     # Different weights must change the turn pattern
     def check_custom_ratio() -> None:
-        scheduler = FrameScheduler(live_weight=1, stored_weight=2)
+        scheduler = FrameScheduler(window_size=1, live_weight=1, stored_weight=2)
         scheduler.set_connected(False)
         scheduler.add_frame(_make_frame(1, 0.90))
         scheduler.add_frame(_make_frame(2, 0.80))
@@ -190,7 +198,9 @@ def test_scheduler_modes() -> None:
 
     # Waiting live frames must survive an outage before migration is due
     def check_live_queue_survives_outage() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         frame = _make_frame(1, 0.50)
         scheduler.add_frame(frame)
         scheduler.set_connected(False)
@@ -227,7 +237,9 @@ def test_inflight_retention() -> None:
 
     # Reserving a frame must block another reservation until acknowledgment
     def check_reservation_and_acknowledgment() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         first = _make_frame(1, 0.50)
         second = _make_frame(2, 0.50)
         scheduler.add_frame(first)
@@ -249,7 +261,9 @@ def test_inflight_retention() -> None:
 
     # An incorrect acknowledgment must leave the frame unresolved
     def check_wrong_acknowledgment() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         scheduler.add_frame(_make_frame(1, 0.50))
         scheduler.reserve_next_frame()
 
@@ -265,7 +279,9 @@ def test_inflight_retention() -> None:
 
     # The final banked frame remains part of reintegration until acknowledged
     def check_outage_with_unresolved_bank_frame() -> None:
-        scheduler = FrameScheduler()
+        scheduler = FrameScheduler(
+            window_size=1,
+        )
         frame = _make_frame(1, 0.90)
 
         scheduler.set_connected(False)
@@ -349,7 +365,7 @@ def test_live_migration() -> None:
     # Move one oldest live frame after each full interval
     def check_interval_and_oldest_frame() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         first = _make_frame(30, 0.20)
         second = _make_frame(10, 0.90)
         scheduler.add_frame(first)
@@ -384,7 +400,7 @@ def test_live_migration() -> None:
     # Use original arrival order when migrated and banked scores tie
     def check_original_arrival_order() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         earlier = _make_frame(30, 0.90)
         later = _make_frame(10, 0.90)
         scheduler.add_frame(earlier)
@@ -400,7 +416,7 @@ def test_live_migration() -> None:
     # Retry reports must not postpone the next move
     def check_repeated_down_reports() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         frame = _make_frame(1)
         scheduler.add_frame(frame)
         scheduler.set_connected(False)
@@ -413,7 +429,7 @@ def test_live_migration() -> None:
     # A new outage must wait its own full interval
     def check_timer_reset() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         frame = _make_frame(1)
         scheduler.add_frame(frame)
         scheduler.set_connected(False)
@@ -433,7 +449,7 @@ def test_live_migration() -> None:
     # A waiting frame can move while the unresolved frame remains retained
     def check_inflight_is_untouched() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         inflight = _make_frame(1)
         waiting = _make_frame(2)
         scheduler.add_frame(inflight)
@@ -456,7 +472,7 @@ def test_live_migration() -> None:
     # Late timer checks must not move a burst of frames
     def check_late_poll() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         first = _make_frame(1)
         second = _make_frame(2)
         scheduler.add_frame(first)
@@ -472,7 +488,7 @@ def test_live_migration() -> None:
     # Reintegration must keep waiting live frames in their existing lane
     def check_no_migration_while_reintegrating() -> None:
         now = 0.0
-        scheduler = FrameScheduler(clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, clock=lambda: now)
         live = _make_frame(1)
         scheduler.add_frame(live)
         scheduler.set_connected(False)
@@ -487,7 +503,7 @@ def test_live_migration() -> None:
     # The migration interval must be configurable and positive
     def check_interval_setting() -> None:
         now = 0.0
-        scheduler = FrameScheduler(migration_interval=2.0, clock=lambda: now)
+        scheduler = FrameScheduler(window_size=1, migration_interval=2.0, clock=lambda: now)
         frame = _make_frame(1)
         scheduler.add_frame(frame)
         scheduler.set_connected(False)
@@ -496,7 +512,7 @@ def test_live_migration() -> None:
 
         for interval in [0, -1, float("inf"), float("nan"), True, None]:
             with pytest.raises(ValueError):
-                FrameScheduler(migration_interval=interval)
+                FrameScheduler(window_size=1, migration_interval=interval)
 
     check_interval_and_oldest_frame()
     check_original_arrival_order()
@@ -516,10 +532,7 @@ def test_live_migration() -> None:
 # Create a frame with its own capture time
 def _make_timed_frame(frame_id: int, timestamp: float, priority: float) -> ImageFrame:
     return ImageFrame(
-        frame_id=frame_id,
-        timestamp=timestamp,
-        image_bytes=b"test image bytes",
-        priority=priority
+        frame_id=frame_id, timestamp=timestamp, image_bytes=b"test image bytes", priority=priority
     )
 
 
@@ -551,7 +564,7 @@ def test_bank_order() -> None:
             _make_timed_frame(1, 300.0, 0.90),
             _make_timed_frame(2, 3000.0, 0.70),
             _make_timed_frame(3, 3008.0, 0.80),
-            _make_timed_frame(4, 3540.0, 0.30)
+            _make_timed_frame(4, 3540.0, 0.30),
         ]
 
     # Without an order the bank must keep sending the highest score first
@@ -599,10 +612,21 @@ def test_bank_order() -> None:
 
         assert [_pop_id(scheduler) for _ in range(6)] == [5, 3, 6, 1, 2, 4]
 
+    # A reserved frame must count toward its encounter before its receipt arrives
+    def check_reserved_frames_count() -> None:
+        scheduler = _banked(sightings(), window_size=2, bank_order=by_encounter)
+
+        first = scheduler.reserve_next_frame()
+        second = scheduler.reserve_next_frame()
+        assert (first.frame_id, second.frame_id) == (3, 1)
+        assert scheduler.reserve_next_frame() is None
+
     # An order that names no waiting frame must be rejected
     def check_bad_orders() -> None:
         for answer in [None, 4, -1]:
-            scheduler = _banked(sightings(), bank_order=lambda times, scores, sent: answer)
+            scheduler = _banked(
+                sightings(), bank_order=lambda times, scores, sent, answer=answer: answer
+            )
 
             with pytest.raises(ValueError):
                 scheduler.pop_next_frame()
@@ -612,6 +636,7 @@ def test_bank_order() -> None:
     check_preview_changes_nothing()
     check_live_delivery_counts()
     check_reintegration_turns()
+    check_reserved_frames_count()
     check_bad_orders()
 
 
@@ -708,4 +733,3 @@ def test_rescoring() -> None:
     check_inflight_is_untouched()
     check_history_is_cleared()
     check_bad_score_changes_nothing()
-

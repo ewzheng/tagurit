@@ -28,6 +28,7 @@ from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.main import run_client
 from tagurit.client.scheduler_datatypes import BankOrder, Rescorer
 from tagurit.protocol import ImageFrame
+from tagurit.shared.telemetry import EventLog
 
 
 class FrameTagger(Protocol):
@@ -233,6 +234,10 @@ async def run(
     dropped: Callable[[int], None] | None = None,
     bank_order: BankOrder | None = None,
     missions: AsyncIterable[Sequence[str]] | None = None,
+    *,
+    adaptive_window: bool = False,
+    encoder: str = "auto",
+    event_log: EventLog | None = None,
 ) -> None:
     """
     Tag images and run the client on them until the images end and every frame is acknowledged.
@@ -254,6 +259,9 @@ async def run(
         - bank_order (BankOrder | None): picks the banked frame to send next, such as
           ``tagging.order.next_frame`` with its threshold bound; None sends by priority
         - missions (AsyncIterable[Sequence[str]] | None): query phrases of each new mission
+        - adaptive_window (bool): adjust in-flight capacity from receipt feedback
+        - encoder (str): auto, software, or hardware H.264 encoding backend
+        - event_log (EventLog | None): optional caller-owned client event log
 
     Return: void
     """
@@ -266,4 +274,13 @@ async def run(
     frames = tag_frames(
         images, tagger, drop_stale=drop_stale, min_interval=min_interval, dropped=dropped
     )
-    await run_client(frames, report, send_interval, bank_order, rescorers)
+    await run_client(
+        frames,
+        report,
+        send_interval=send_interval,
+        adaptive_window=adaptive_window,
+        encoder=encoder,
+        event_log=event_log,
+        bank_order=bank_order,
+        rescorers=rescorers,
+    )

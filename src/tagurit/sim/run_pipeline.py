@@ -37,6 +37,8 @@ ringed in red at the head of the queue it came from.
 window off for headless runs. Press q or Esc in the window to stop. Cut the
 network to watch tagged frames bank up; restore it to watch the bank
 drain. Needs the ``model`` extra and a running receiver.
+``--adaptive-window`` enables receipt-based client flow control, and
+``--events PATH`` saves client events to a new CSV file.
 """
 
 from __future__ import annotations
@@ -59,9 +61,11 @@ import numpy as np
 
 from tagurit import orchestrator
 from tagurit.client.config import GABRIEL_ENDPOINT
+from tagurit.client.encoder_selection import ENCODER_MODES
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.scheduler_datatypes import BankOrder
 from tagurit.protocol import ImageFrame
+from tagurit.shared.telemetry import EventLog
 from tagurit.sim import dataloader
 from tagurit.sim.config import FRAME_INTERVAL_SECONDS
 from tagurit.sim.pipeline_view import (
@@ -334,6 +338,10 @@ async def run_demo(
     min_interval: float = 0.0,
     bank_order: BankOrder | None = None,
     missions: AsyncIterator[Sequence[str]] | None = None,
+    *,
+    adaptive_window: bool = False,
+    encoder: str = "auto",
+    event_log: EventLog | None = None,
 ) -> np.ndarray:
     """
     Run the pipeline with the console, and the dashboard when asked for.
@@ -354,6 +362,9 @@ async def run_demo(
         - min_interval (float): least seconds between the capture times of tagged frames
         - bank_order (BankOrder | None): picks the banked frame to send next; None is by priority
         - missions (AsyncIterator[Sequence[str]] | None): query phrases of each new mission
+        - adaptive_window (bool): adjust client in-flight capacity from receipts
+        - encoder (str): auto, software, or hardware H.264 encoding backend
+        - event_log (EventLog | None): optional caller-owned client event log
 
     Return: the final dashboard image
     """
@@ -373,6 +384,9 @@ async def run_demo(
             dropped=dropped.append,
             bank_order=bank_order,
             missions=missions,
+            adaptive_window=adaptive_window,
+            encoder=encoder,
+            event_log=event_log,
         )
     )
     drawer = None
@@ -444,6 +458,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--limit", type=int, help="replay at most this many frames")
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
+    parser.add_argument("--adaptive-window", action="store_true")
+    parser.add_argument("--encoder", choices=ENCODER_MODES, default="auto")
+    parser.add_argument("--events", type=Path, help="write client events to a new CSV file")
     parser.add_argument(
         "--view", action=argparse.BooleanOptionalAction, default=True, help="show the window"
     )
@@ -506,7 +523,9 @@ def main(argv: list[str] | None = None) -> None:
             f"Mission changes to {', '.join(args.retarget)} after {args.retarget_after:g}s",
             flush=True,
         )
+    event_log = None
     try:
+        event_log = EventLog(args.events) if args.events is not None else None
         final = asyncio.run(
             run_demo(
                 frames,
@@ -520,12 +539,17 @@ def main(argv: list[str] | None = None) -> None:
                 args.min_interval,
                 bank_order,
                 missions,
+                adaptive_window=args.adaptive_window,
+                encoder=args.encoder,
+                event_log=event_log,
             )
         )
     except KeyboardInterrupt:
         print("\nPipeline stopped")
         return
     finally:
+        if event_log is not None:
+            event_log.close()
         if video is not None:
             video.release()
             print(f"Wrote {args.video}", flush=True)

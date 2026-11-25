@@ -173,16 +173,14 @@ def test_tagger_errors_propagate() -> None:
 def test_run_hands_tagged_frames_to_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[ImageFrame] = []
     reports: list[object] = []
+    options: list[dict[str, object]] = []
 
     async def fake_run_client(
-        frames: AsyncIterable[ImageFrame],
-        report: object,
-        send_interval: float,
-        bank_order: object,
-        rescorers: object,
+        frames: AsyncIterable[ImageFrame], report: object, **kwargs: object
     ) -> None:
         received.extend([frame async for frame in frames])
-        reports.append((report, send_interval, bank_order, rescorers))
+        reports.append(report)
+        options.append(kwargs)
 
     def report(event: str, detail: str, scheduler: object) -> None:
         pass
@@ -194,11 +192,27 @@ def test_run_hands_tagged_frames_to_the_client(monkeypatch: pytest.MonkeyPatch) 
 
     asyncio.run(
         orchestrator.run(
-            images([b"aa", b"b"]), LengthTagger(), report, 0.25, drop_stale=False, bank_order=order
+            images([b"aa", b"b"]),
+            LengthTagger(),
+            report,
+            0.25,
+            drop_stale=False,
+            bank_order=order,
+            adaptive_window=True,
         )
     )
     assert [(f.frame_id, f.priority) for f in received] == [(1, 0.2), (2, 0.1)]
-    assert reports == [(report, 0.25, order, None)]
+    assert reports == [report]
+    assert options == [
+        {
+            "send_interval": 0.25,
+            "adaptive_window": True,
+            "encoder": "auto",
+            "event_log": None,
+            "bank_order": order,
+            "rescorers": None,
+        }
+    ]
 
 
 class GainTagger(LengthTagger):
@@ -246,9 +260,9 @@ def test_run_passes_rescorers_only_for_a_tagger_that_can_change_its_query(
     async def fake_run_client(
         frames: AsyncIterable[ImageFrame],
         report: object,
-        send_interval: float,
-        bank_order: object,
+        *,
         rescorers: AsyncIterable,
+        **kwargs: object,
     ) -> None:
         tagged = [frame async for frame in frames]
         async for rescorer in rescorers:

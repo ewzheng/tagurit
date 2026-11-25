@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -108,3 +109,41 @@ def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.M
     with pytest.raises(RuntimeError, match="no display"):
         asyncio.run(run_pipeline.run_demo([], 0.0, 0.0, recorder, {}, False, BrokenVideo()))  # type: ignore[arg-type]
     assert cancelled == [True]
+
+
+@pytest.mark.usefixtures("dataset")
+def test_cli_passes_adaptive_mode_and_event_log(tmp_path, monkeypatch) -> None:
+    """The end-to-end entry point enables adaptive mode and owns its CSV log."""
+    options = []
+    event_path = tmp_path / "client-events.csv"
+
+    async def fake_run_demo(*_args, **kwargs):
+        options.append(kwargs)
+        kwargs["event_log"].record("window_change", "test", window_size=4)
+        return np.zeros((1, 1, 3), dtype=np.uint8)
+
+    # A bundle without a detection threshold, so the bank sends by priority.
+    tagger = SimpleNamespace(detection=None)
+    monkeypatch.setattr(run_pipeline, "load_bundle", lambda *_args, **_kwargs: tagger)
+    monkeypatch.setattr(run_pipeline, "run_demo", fake_run_demo)
+    run_pipeline.main(
+        [
+            str(tmp_path / "bundle"),
+            "--dataset",
+            DATASET,
+            "--sequences",
+            "a",
+            "--all-frames",
+            "--limit",
+            "1",
+            "--no-view",
+            "--adaptive-window",
+            "--encoder",
+            "software",
+            "--events",
+            str(event_path),
+        ]
+    )
+    assert options[0]["adaptive_window"] is True
+    assert options[0]["encoder"] == "software"
+    assert "window_change" in event_path.read_text()

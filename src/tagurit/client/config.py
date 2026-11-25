@@ -10,7 +10,10 @@ STORED_FRAME_WEIGHT = 1
 LIVE_TO_BANK_INTERVAL_SECONDS = 5.0
 
 # Set the minimum time between image submissions
-SEND_INTERVAL_SECONDS = 5.0
+SEND_INTERVAL_SECONDS = 0.0
+
+# Maximum reserved images, including encoding and awaiting receipts
+INFLIGHT_WINDOW = 2
 
 # Set how often the client checks for work and timeouts
 LOOP_INTERVAL_SECONDS = 0.02

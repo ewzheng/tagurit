@@ -29,11 +29,17 @@ Downstream decides whether to keep it, when to send it, and how.
 | `model/` | Tile-scoring models behind `scorer.TileScorer`, and `scorer.WindowedTileScorer` for scorers that remember recent frames: anomalib PatchCore, query-only CLIP with window novelty through `transformers`, the novelty window and its scale, shared tile preprocessing, tiling, device choice; owned by Elias |
 | `tagging/` | Frame priority from the most unusual tile, capture times passed to windowed scorers, a non-saturating score mapping, saved bundles, and the time-aware send order for banked frames (`order`); owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank with an optional caller-supplied send order, arbitration and in-flight frame ownership |
+| `client/adaptive_window.py` | Optional client-window probing from recent receipt delay and throughput |
 | `client/scheduler_datatypes.py` | Operating states, internal priority bank entries and the bank order's signature |
+| `client/rolling_metrics.py` | Recent validated receipt delay and acknowledged frame rate |
 | `client/gabriel_transport.py` | One Gabriel image producer, receipt matching, timeouts, retries and communication-health reporting |
+| `client/encoder_selection.py` | Startup selection of Jetson H.264 hardware or portable software encoding |
+| `client/jetson_h264.py` | Persistent Jetson GStreamer V4L2 H.264 encoder of independent images at QP 29 |
 | `client/main.py` | Runs the scheduler and transport with a caller-supplied asynchronous frame source |
 | `cloudlet/` | Gabriel receiver, image validation, duplicate tracking and receipts |
 | `shared/image_protocol.py` | Wire message and receipt types, encoding, decoding and content hashes |
+| `shared/telemetry.py` | Optional CSV event recording for timing experiments |
+| `sim/flow_metrics.py` | Per-frame and aggregate baseline timing summaries |
 | `shared/image_codec.py` | Software H.264/H.265 encoding and decoding of independent frames |
 | `sim/` | Manifest image feeder, scheduled connectivity, console demo, dataset trace loaders (box-annotated and frame-labelled), synthetic sparse crops, normal-tile sampling and ranking metrics |
 
@@ -45,6 +51,8 @@ draws a live dashboard of the latest frame and the bank and live queue in
 send order, the latest frame sent marked, optionally recorded to MP4. The orchestrator takes
 images from any source and never imports `sim/`, so a camera source plugs in
 the same way.
+The pipeline accepts `--adaptive-window` and `--events` so scored frames use
+the same optional client controller and event log as the queueing demo.
 
 ## Tagging
 
@@ -134,7 +142,7 @@ The priority bank selects the highest score first, with arrival order
 breaking ties. When the orchestrator's caller supplies a bank order, the
 bank asks it instead on every stored turn, passing the capture time and
 priority of each waiting frame and of every frame already acknowledged
-from either queue. The demo supplies `tagging.order.next_frame` whenever
+or still in flight, from either queue. The demo supplies `tagging.order.next_frame` whenever
 the bundle has a detection threshold, so the bank sends one frame per
 encounter before any repeat, newest encounter first, and a detection that
 already went out live counts towards its encounter. The scheduler never
@@ -157,19 +165,33 @@ The current demo uses actual transport health. The schedule in
 
 ## Delivery and recovery
 
-Only one image is unresolved at a time. Selecting or sending a frame does
-not release it from the scheduler.
+The fixed client window is configurable and defaults to two reserved images.
+Optional adaptive mode starts at four and probes limits 1, 2, 4 and 8.
+It counts both encoding and awaiting-receipt work. Each frame remains in a map
+owned by the scheduler until its matching receipt; acknowledgments may arrive
+out of order. Gabriel grants a separate server credit budget at registration.
+The effective sending limit is bounded by both budgets. A validated receipt
+releases exactly one application slot; invalid receipts halt the transport.
+Shrinking the client limit retains outstanding frames and blocks new
+reservations until receipts bring the count below the limit. Replayed frames
+also respect the new active-submission limit. Default artificial send pacing
+is zero.
 
 Each transmission includes a session UUID, frame ID and image hash.
 The client releases a frame only after receiving a matching receipt.
-The current default transcodes each JPEG to one independent H.264 frame at
-CRF 32. The wire header identifies its codec and original dimensions. The
+The default selects a hardware H.264 encoder at QP 29 after a successful
+startup encode/decode probe, or falls back to software H.264 at CRF 32.
+`--encoder software` forces the portable encoder and `--encoder hardware`
+requires the Jetson backend. Each JPEG becomes an independent H.264 frame.
+The wire header identifies its codec and original dimensions. The
 encoded bytes are retained unchanged across retries, and the cloudlet decodes
 them before returning a receipt.
 
 Connection failures and receipt timeouts cause the client to clean up the
-old connection, wait, and reconnect. The unresolved image is retried before
-new work, using the same identity and contents.
+old connection, wait, and reconnect. All unresolved images are replayed in reservation order before new work, using
+the same identities and encoded bytes. Each submitted frame has its own receipt
+deadline. Reconnection resets connection credits and submission times, while
+retaining payloads; callbacks from old connections are ignored.
 
 The receiver validates and decodes a new image, then retains it and its
 receipt before returning the acknowledgment. Matching retries return the
@@ -191,16 +213,60 @@ communication eventually allows the retained work to be delivered.
 - Python: 3.10+, with dependencies managed by uv. The Jetson runs 3.10,
   the only Python with CUDA PyTorch on JetPack 6
 
+## Timing experiments
+
+`scripts/benchmark_flow_control.py` runs a finite, preloaded JPEG sample with
+explicit test priorities against a separately started cloudlet. Client event
+logging and the send interval are optional parameters of `run_client`; the
+regular demo accepts `--window` and `--send-interval` and records a per-frame
+client CSV by default. It prints recent mean submit-to-receipt delay and
+acknowledged frames per second at a configurable reporting interval. The
+measurement horizon is separate from the in-flight limit. The baseline sets the interval to
+zero and accepts `--window N` (default one for baseline compatibility). Raw events, input hashes, settings,
+per-frame delays and summary statistics are saved under gitignored `data/`.
+`scripts/benchmark_window_sweep.py` runs that benchmark sequentially for
+multiple fixed windows, saving each run plus a comparison CSV. It requires a
+separately running receiver and records the operator's network-condition label;
+it does not change the network profile itself.
+The finite benchmark also has an interactive marker mode. The operator changes
+Network Link Conditioner manually and types the new profile into the client
+terminal. A marker in the same client event CSV and a concise console log align
+those switch times with the rolling measurements and adaptive window changes.
+The cloudlet's optional `--events` CSV records acceptance using the same session
+and frame identity without changing the image wire format.
+
+Queue delay ends at scheduler selection; encoding is measured separately.
+Send-to-receipt starts at the encoded payload handoff to Gabriel, after encoding,
+and includes transport scheduling and cloudlet decoding. It is not network RTT.
+Durations use client monotonic time, never subtraction of server/client clocks.
+Retries preserve bytes and the original arrival event; retry-free latency
+percentiles exclude them. Incomplete runs retain unfinished rows.
+
+The cloudlet accepts `--tokens N` and `--queue-size N`. Its queue defaults to
+at least N and rejects smaller explicit values. Capacity sizing assumes one
+producer; additional clients share the server queue and may cause overload.
+The server allowance must be at least the desired client window to exercise
+that window fully. Optional adaptive mode changes only the client limit.
+Every ten seconds it checks recent validated receipts, reducing the limit
+when mean first-submit-to-receipt delay exceeds one second and probing upward
+only when waiting frames can use another slot. A probe is kept only if
+acknowledged frames per second improves by at least three percent without
+exceeding the delay target. Connection failures cause an immediate step down.
+Window changes and reasons are recorded in client CSV events. These settings
+are initial heuristics rather than a physical bandwidth estimate.
+
 ## Known limitations
 
 - Frames arriving before an outage is detected enter the live queue and remain
   there after disconnection is detected; moving or scoring this backlog is unresolved
 - A receipt timeout cannot distinguish network failure from slow transmission
   or slow server processing
-- Connection quality and available bandwidth are not yet measured
+- Physical available bandwidth is not measured; adaptive mode uses receipt feedback
 - Stopping either application loses its in-memory records
 - The repeating demo stops immediately on Ctrl+C and may leave queued frames
 - The receiver accepts images but does not yet run a heavy model
+- Jetson hardware encoding rebuilds its GStreamer pipeline on image resolution
+  changes; mixed-resolution streams pay this startup cost repeatedly
 - The orchestrator drops an image only for being stale or, with
   `min_interval`, too soon after the last one tagged; it does not test
   whether the picture changed. Consecutive drone frames always differ
@@ -249,7 +315,7 @@ communication eventually allows the retained work to be delivered.
 ## Deferred
 
 - Real camera input as an orchestrator image source
-- Jetson hardware encoding and adaptive codec or quality selection
+- Adaptive codec or quality selection
 - Embedding transmission
 - Live learning on the cloudlet
 - Bandwidth-aware scheduling and transmission
