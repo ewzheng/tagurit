@@ -1,6 +1,4 @@
-"""Tests for novelty against a time window of recent tile embeddings, and its scale."""
-
-import math
+"""Tests for novelty against a window of the last few frames' tile embeddings, and its scale."""
 
 import numpy as np
 import pytest
@@ -10,56 +8,70 @@ from tagurit.model.novelty import NoveltyScale, NoveltyWindow
 X, Y, Z = np.eye(3, dtype=np.float32)
 
 
-def test_nothing_earlier_is_nan_and_same_frame_tiles_never_count() -> None:
-    window = NoveltyWindow(10.0)
-    first = window.observe(np.stack([X, X]), timestamp=0.0)
+def test_the_first_frame_is_nan_and_same_frame_tiles_never_count() -> None:
+    window = NoveltyWindow(10)
+    first = window.observe(np.stack([X, X]))
     assert np.isnan(first).all()  # its own twin tile does not make it familiar
 
 
 def test_seen_tiles_are_familiar_and_new_ones_novel() -> None:
-    window = NoveltyWindow(10.0)
-    window.observe(np.stack([X]), timestamp=0.0)
-    novelty = window.observe(np.stack([X, Y, -X]), timestamp=1.0)
+    window = NoveltyWindow(10)
+    window.observe(np.stack([X]))
+    novelty = window.observe(np.stack([X, Y, -X]))
     assert novelty == pytest.approx([0.0, 0.5, 1.0])
 
 
-def test_frames_at_the_same_time_do_not_count() -> None:
-    window = NoveltyWindow(10.0)
-    window.observe(np.stack([X]), timestamp=3.0)
-    assert np.isnan(window.observe(np.stack([X]), timestamp=3.0)).all()
-    assert window.observe(np.stack([X]), timestamp=3.5) == pytest.approx([0.0])
+def test_every_frame_after_the_first_has_something_to_compare_with() -> None:
+    window = NoveltyWindow(1)
+    window.observe(np.stack([X]))
+    for _ in range(5):  # however long ago the last frame was, it is still the last frame
+        assert window.observe(np.stack([X])) == pytest.approx([0.0])
 
 
-def test_frames_older_than_the_window_are_forgotten() -> None:
-    window = NoveltyWindow(2.0)
-    window.observe(np.stack([X]), timestamp=0.0)
-    window.observe(np.stack([Y]), timestamp=1.5)
-    novelty = window.observe(np.stack([X, Y]), timestamp=3.0)
-    assert novelty[0] == pytest.approx(0.5)  # X at 0 s is out of a 2 s window at 3 s
+def test_only_the_last_frames_are_remembered() -> None:
+    window = NoveltyWindow(2)
+    window.observe(np.stack([X]))
+    window.observe(np.stack([Y]))
+    window.observe(np.stack([Y]))  # the third frame pushes X out of a two-frame window
+    novelty = window.observe(np.stack([X, Y]))
+    assert novelty[0] == pytest.approx(0.5)
     assert novelty[1] == pytest.approx(0.0)
 
 
-def test_a_clock_that_goes_back_starts_a_new_window() -> None:
-    window = NoveltyWindow(10.0)
-    window.observe(np.stack([X]), timestamp=100.0)
-    assert np.isnan(window.observe(np.stack([X]), timestamp=0.0)).all()
+def test_a_frame_stays_for_exactly_the_window() -> None:
+    window = NoveltyWindow(3)
+    window.observe(np.stack([X]))
+    window.observe(np.stack([Y]))
+    window.observe(np.stack([Y]))
+    assert window.observe(np.stack([X])) == pytest.approx([0.0])  # X is three frames back
+
+
+def test_reset_starts_a_new_flight() -> None:
+    window = NoveltyWindow(10)
+    window.observe(np.stack([X]))
     window.reset()
-    assert np.isnan(window.observe(np.stack([Z]), timestamp=1.0)).all()
+    assert np.isnan(window.observe(np.stack([X]))).all()
+    assert window.observe(np.stack([X])) == pytest.approx([0.0])
+
+
+def test_a_frame_without_tiles_takes_a_place_but_adds_nothing() -> None:
+    window = NoveltyWindow(2)
+    window.observe(np.zeros((0, 3), dtype=np.float32))
+    assert np.isnan(window.observe(np.stack([X]))).all()
+    assert window.observe(np.zeros((0, 3), dtype=np.float32)).shape == (0,)
+    assert window.observe(np.stack([X])) == pytest.approx([0.0])
 
 
 def test_bad_input_is_rejected() -> None:
+    for frames in (0, -1, 2.0, 10.0, True, None):
+        with pytest.raises(ValueError):
+            NoveltyWindow(frames)  # type: ignore[arg-type]
+    window = NoveltyWindow(1)
     with pytest.raises(ValueError):
-        NoveltyWindow(0.0)
+        window.observe(X)  # not (tiles, dim)
+    window.observe(np.stack([X]))
     with pytest.raises(ValueError):
-        NoveltyWindow(math.inf)
-    window = NoveltyWindow(1.0)
-    with pytest.raises(ValueError):
-        window.observe(X, timestamp=0.0)  # not (tiles, dim)
-    with pytest.raises(ValueError):
-        window.observe(np.stack([X]), timestamp=math.nan)
-    window.observe(np.stack([X]), timestamp=0.0)
-    with pytest.raises(ValueError):
-        window.observe(np.ones((1, 4), dtype=np.float32), timestamp=0.5)
+        window.observe(np.ones((1, 4), dtype=np.float32))
 
 
 def test_scale_is_neutral_until_enough_novelty_is_seen() -> None:

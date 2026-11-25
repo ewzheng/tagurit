@@ -20,7 +20,9 @@ The detection threshold for ``tagurit.tagging.order`` is calibrated too:
 the leading ``--detection-frames`` frames of the fit split are scored in
 capture order, novelty included, as the scout would score them, and the
 ``--detection-percentile`` of the priorities of those holding no target
-becomes the threshold. ``--detection-frames 0`` skips it.
+becomes the threshold. ``--detection-frames 0`` skips it. The novelty
+window is ``--window`` tagged frames, and every image of the dataset
+counts as one frame, each crop of a sparse stream included.
 
 Weights download from the Hugging Face Hub on first use. Needs the
 ``model`` extra: ``uv sync --extra model``.
@@ -74,7 +76,7 @@ def normal_frame_priorities(
     for frames in sequences:
         tagger.reset()
         for frame in frames[:share]:
-            priority = tagger.score(frame.read(), frame.timestamp).priority
+            priority = tagger.score(frame.read(), remember=True).priority
             if frame.has_target((DONT_CARE,)) is False:
                 priorities.append(priority)
     return priorities
@@ -116,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--model", default=defaults.model, help="Hugging Face model id")
     parser.add_argument("--targets", nargs="+", help="query phrases; default ClipConfig's")
     parser.add_argument(
-        "--window", type=float, default=defaults.window, help="novelty window, seconds"
+        "--window", type=int, default=defaults.window_frames, help="novelty window, tagged frames"
     )
     parser.add_argument("--device", help="torch device; default cuda, then mps, then cpu")
     parser.add_argument("--seed", type=int, default=0)
@@ -130,6 +132,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if not 0.0 < args.fit_fraction < 1.0:
         parser.error("--fit-fraction must be strictly between 0 and 1")
+    if args.window <= 0:
+        parser.error("--window must be a positive number of frames")
     names = args.sequences or dataloader.sequences(args.dataset)
     if not names:
         parser.error(f"no {args.dataset} sequences on disk")
@@ -153,7 +157,7 @@ def main(argv: list[str] | None = None) -> None:
     config = ClipConfig(
         model=args.model,
         targets=tuple(args.targets) if args.targets else defaults.targets,
-        window=args.window,
+        window_frames=args.window,
     )
     started = time.perf_counter()
     scorer = ClipScorer.load(config, device=args.device, half=args.half)

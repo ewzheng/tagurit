@@ -27,7 +27,7 @@ Downstream decides whether to keep it, when to send it, and how.
 | `protocol.py` | Shared image handoff datatype, priority validation, and the opaque state a tagger keeps with a frame for rescoring |
 | `orchestrator.py` | Edge pipeline: stamps captured image bytes, tags the newest one off the event loop into an `ImageFrame` whenever the tagger is free, dropping images that go stale while it is busy, and runs the client on the tagged frames |
 | `model/` | Tile-scoring models behind `scorer.TileScorer`, and `scorer.WindowedTileScorer` for scorers that remember recent frames: anomalib PatchCore, query-only CLIP with window novelty through `transformers`, the novelty window and its scale, shared tile preprocessing, tiling, device choice; owned by Elias |
-| `tagging/` | Frame priority from the most unusual tile, capture times passed to windowed scorers, a non-saturating score mapping, saved bundles, and the time-aware send order for banked frames (`order`); owned by Elias |
+| `tagging/` | Frame priority from the most unusual tile, frames fed in capture order to windowed scorers, a non-saturating score mapping, saved bundles, and the time-aware send order for banked frames (`order`); owned by Elias |
 | `client/frame_scheduler.py` | State transitions, live FIFO queue, priority bank with an optional caller-supplied send order, arbitration and in-flight frame ownership |
 | `client/adaptive_window.py` | Optional client-window probing from recent receipt delay and throughput |
 | `client/scheduler_datatypes.py` | Operating states, internal priority bank entries and the bank order's signature |
@@ -69,14 +69,17 @@ so 0.5 means "as unusual as the most unusual normal tiles".
 The CLIP scorer (`model/clip.py`) embeds each tile once and scores it on two
 terms. The query term is the tile's best dot product with "an aerial photo
 of {phrase}." minus "an aerial photo.", with no reject phrases. The novelty
-term is its distance to the nearest tile of an earlier frame in the last 10
-s (`model/novelty.py`), so a target that stays in view fades. On arrival
+term is its distance to the nearest tile of the last 20 tagged frames
+(`model/novelty.py`, `ClipConfig.window_frames`), so a target that stays in
+view fades. The window counts frames, not seconds: its memory and search
+cost are fixed at any frame rate, it is never empty after a flight's first
+frame, and a recorded flight scores the same at any replay speed. On arrival
 each term becomes a percentile: the query against target-free calibration
 tiles saved in the bundle, novelty against a sample of the flight's earlier
 novelty. A tile scores the mean of the two percentiles, as a non-saturating
-log-odds. `Tagger.tag` passes each frame's capture time to such a windowed
-scorer, so frames must be tagged in capture order, and `Tagger.reset`
-starts a new flight. The scorer keeps the text encoder, so `set_targets`
+log-odds. `Tagger.tag` scores each frame as the next one of the flight, so
+frames must be tagged in capture order. Scoring reads no clock, so only
+`Tagger.reset` starts a new flight. The scorer keeps the text encoder, so `set_targets`
 switches the query on board, and `retarget` rescores stored tile
 embeddings and novelty percentiles against a new query with one matrix
 product. `scripts/calibrate_clip.py` builds a bundle.
@@ -98,7 +101,9 @@ derives them from priorities on every turn.
 `tagging/order.py` says which banked frame to send next, from capture
 times and priorities alone. A frame at or above the bundle's detection
 threshold (`Tagger.detection`) is a detection, and detections at most 10 s
-apart form an encounter. Detections go first, in passes: each encounter
+apart form an encounter. Unlike the novelty window, the gap is in seconds
+of capture time: how long ago something was seen is what the order is
+about. Detections go first, in passes: each encounter
 gets one frame, its best, before any gets a second, and the newest
 encounter goes first within a pass. A recent sighting is sent before an
 old one, and an old sighting seen once still goes before any repeat and
@@ -106,7 +111,8 @@ before every frame below the threshold; those follow by priority.
 Encounters are derived from the frames on every call, so rescoring the
 bank for a new query regroups them. `calibrate_clip.py` sets the threshold
 at the 99.5th percentile of the priorities of target-free frames, scored
-in capture order as the scout would.
+in capture order as the scout would. A bundle whose novelty window is
+still in seconds does not load; rebuild it with `calibrate_clip.py`.
 
 PatchCore runs through anomalib: a frozen WideResNet-50
 embeds patches, and a tile's score is its largest distance to a memory bank
@@ -292,6 +298,13 @@ are initial heuristics rather than a physical bandwidth estimate.
 - PatchCore bundles, and CLIP bundles built before the threshold was
   added, carry no detection threshold; with those the bank sends by
   priority alone
+- The novelty window counts tagged frames, so what it spans depends on
+  what a frame is. The default of 20 was chosen on the sparse streams, as
+  10 s at two frames a second, and has not been checked on whole camera
+  frames
+- A frame count cannot see a pause: the first frames after a break in
+  capture are compared with the last ones before it. Only `Tagger.reset`
+  starts a new flight
 - The demo stamps frames with replay times, not the dataset's, so a replay faster than one
   frame every few seconds puts all its detections in one encounter
 - An empty frame above the detection threshold within 10 s of two

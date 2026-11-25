@@ -121,7 +121,7 @@ class Recorder:
 
         Return: the tagged frame
         """
-        result = self._tagger.score(image_bytes, timestamp)
+        result = self._tagger.score(image_bytes, remember=True)
         image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
         best = result.tiles[int(np.argmax(result.tile_scores))]
         target = self._targets.get(frame_id)

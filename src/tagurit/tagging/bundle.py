@@ -6,7 +6,7 @@ size, the priority reference, the precision the reference was calibrated
 in, and, when it was calibrated, the priority from which a frame counts as
 a detection (``tagging.order``), plus whatever the model needs. A PatchCore bundle adds the
 memory bank file. A CLIP bundle records its checkpoint id, query, template
-and novelty window in the settings, since its weights come from the
+and novelty window, in frames, in the settings, since its weights come from the
 Hugging Face Hub, and adds the embeddings of the target-free tiles its
 query is scaled against, so a new query can be scaled without them. A
 bundle is what gets shipped to the scout, and later what the cloudlet would
@@ -107,7 +107,11 @@ def load_bundle(directory: Path, device: str | None = None, half: bool | None = 
 
     A missing settings file, missing keys, or an unknown model name RAISES.
     So does a CLIP bundle from before query-only scoring, which named
-    background prompts: rebuild it with ``scripts/calibrate_clip.py``.
+    background prompts, and one whose novelty window is in seconds
+    (``window``) rather than frames (``window_frames``): seconds cannot be
+    turned into frames without a frame rate, and its detection threshold
+    was calibrated through the old window. Rebuild either with
+    ``scripts/calibrate_clip.py``.
     Overriding the calibrated precision shifts raw scores slightly, far
     too little to reorder frames. A bundle without a detection threshold
     loads with ``Tagger.detection`` as None.
@@ -137,6 +141,12 @@ def load_bundle(directory: Path, device: str | None = None, half: bool | None = 
             raise ValueError(
                 f"{directory} is a CLIP bundle from before query-only scoring; "
                 "rebuild it with scripts/calibrate_clip.py"
+            )
+        if "window" in fields:
+            raise ValueError(
+                f"{directory} is a CLIP bundle whose novelty window is {fields['window']:g} "
+                "seconds; the window is now counted in frames, so rebuild the bundle "
+                "with scripts/calibrate_clip.py"
             )
         fields["targets"] = tuple(fields["targets"])
         reference = np.load(directory / settings["reference_file"])

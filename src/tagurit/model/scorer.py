@@ -5,7 +5,7 @@ Tagging depends on these protocols, never on a concrete model, so a model
 can be swapped without touching tagging: PatchCore through anomalib and
 CLIP through transformers today, and later a TensorRT engine or a detector.
 ``TileScorer`` scores tiles on their own; ``WindowedTileScorer`` also
-remembers recent frames, so it is given each frame's capture time;
+remembers recent frames, so it is given whole frames in capture order;
 ``RetargetableTileScorer`` can also change what it looks for and score
 frames it has already seen again without their images. Nothing here
 imports torch.
@@ -46,16 +46,16 @@ class WindowedTileScorer(TileScorer, Protocol):
     A tile scorer whose scores also depend on the frames it saw shortly before.
 
     ``score_frame`` scores one frame and remembers it, so frames must be
-    given in capture order; ``score_tiles`` still scores tiles on their own.
+    given in capture order, with ``reset`` between flights; ``score_tiles``
+    still scores tiles on their own.
     """
 
-    def score_frame(self, tiles: Sequence[np.ndarray], timestamp: float) -> list[float]:
+    def score_frame(self, tiles: Sequence[np.ndarray]) -> list[float]:
         """
         Score one frame's tiles, then remember them.
 
         Parameters:
             - tiles (Sequence[np.ndarray]): uint8 RGB arrays of shape (size, size, 3)
-            - timestamp (float): the frame's capture time in seconds
 
         Return: one raw score per tile, in the order given
         """
@@ -81,15 +81,12 @@ class RetargetableTileScorer(WindowedTileScorer, Protocol):
     more.
     """
 
-    def score_and_keep(
-        self, tiles: Sequence[np.ndarray], timestamp: float
-    ) -> tuple[list[float], object]:
+    def score_and_keep(self, tiles: Sequence[np.ndarray]) -> tuple[list[float], object]:
         """
         Score one frame's tiles, remember them, and return what rescoring the frame needs.
 
         Parameters:
             - tiles (Sequence[np.ndarray]): uint8 RGB arrays of shape (size, size, 3)
-            - timestamp (float): the frame's capture time in seconds
 
         Return: one raw score per tile in the order given, and the frame's kept state
         """

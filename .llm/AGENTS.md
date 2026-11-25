@@ -75,8 +75,8 @@ Fallback tiers, in order. Finish one before starting the next.
 - `uv run python scripts/fit_patchcore.py seadronessee --out data/models/seadronessee`
   — fit a PatchCore tagger bundle on target-free tiles
 - `uv run python scripts/calibrate_clip.py sparse-seadronessee --out data/models/clip-sds-224`
-  — set up a query-only CLIP tagger bundle with window novelty, scaled on target-free tiles,
-  with a detection threshold for the bank's send order
+  — set up a query-only CLIP tagger bundle with novelty over a window of tagged frames,
+  scaled on target-free tiles, with a detection threshold for the bank's send order
 - `uv run python scripts/score_trace.py data/models/seadronessee --manifest data/demo/manifest.csv`
   — score held-out frames, print ranking metrics, write a demo manifest
 - `uv run python3 -m tagurit.sim.run_pipeline data/models/sparse-seadronessee --empty-stride 5`

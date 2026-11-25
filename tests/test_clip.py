@@ -32,7 +32,7 @@ from tagurit.tagging.bundle import (  # noqa: E402
 )
 from tagurit.tagging.priority import PriorityScale  # noqa: E402
 
-CONFIG = ClipConfig(model="tiny-test-clip", targets=("a person", "a boat"), window=5.0)
+CONFIG = ClipConfig(model="tiny-test-clip", targets=("a person", "a boat"), window_frames=5)
 
 
 def tiny_clip() -> transformers.CLIPModel:
@@ -151,32 +151,46 @@ def test_score_tiles_is_the_query_alone_on_the_reference_scale() -> None:
 def test_novelty_lowers_tiles_just_seen_and_retarget_reproduces_scores() -> None:
     scorer = make_scorer()
     for t in range(4):  # enough recent novelty to set its scale
-        scorer.terms(unit_rows(6, seed=t), timestamp=float(t))
+        scorer.terms(unit_rows(6, seed=t))
     seen = unit_rows(6, seed=3)[0]
     new = unit_rows(1, seed=99)[0]
-    terms = scorer.terms(np.stack([seen, new]), timestamp=4.0)
+    terms = scorer.terms(np.stack([seen, new]))
     assert terms.novelty_p[0] < terms.novelty_p[1]
     assert np.allclose(retarget(terms.embeddings, terms.novelty_p, scorer.query), terms.scores)
     assert np.allclose(terms.scores, combine(terms.query_z, terms.novelty_p))
 
     scorer.reset()  # no recent novelty, so novelty is neutral again
-    assert (scorer.terms(np.stack([new]), timestamp=5.0).novelty_p == 0.5).all()
+    assert (scorer.terms(np.stack([new])).novelty_p == 0.5).all()
 
 
-def test_a_clock_that_goes_back_starts_afresh() -> None:
+def test_the_window_holds_the_configured_number_of_frames() -> None:
+    def novelty_of_repeat(frames_between: int) -> np.ndarray:
+        scorer = make_scorer(min_history=1)  # CONFIG's window is five frames
+        scorer.terms(unit_rows(4, seed=0))
+        for i in range(frames_between):
+            scorer.terms(unit_rows(4, seed=100 + i))
+        return scorer.terms(unit_rows(4, seed=0)).novelty_p
+
+    remembered, forgotten = novelty_of_repeat(4), novelty_of_repeat(5)
+    assert (remembered == 0.0).all()  # five frames back: still in the window, nothing is less novel
+    assert (forgotten > 0.0).all()  # six frames back: out of it
+
+
+def test_only_reset_starts_a_new_flight() -> None:
     scorer = make_scorer(min_history=1)
-    scorer.terms(unit_rows(4, seed=0), timestamp=10.0)
-    scorer.terms(unit_rows(4, seed=1), timestamp=11.0)
-    terms = scorer.terms(unit_rows(4, seed=0), timestamp=0.0)
-    assert (terms.novelty_p == 0.5).all()
+    scorer.terms(unit_rows(4, seed=0))
+    scorer.terms(unit_rows(4, seed=1))
+    assert (scorer.terms(unit_rows(4, seed=0)).novelty_p == 0.0).all()  # seen two frames ago
+    scorer.reset()
+    assert (scorer.terms(unit_rows(4, seed=0)).novelty_p == 0.5).all()  # a flight's first frame
 
 
 def test_score_frame_matches_terms_on_its_embeddings() -> None:
     first, second = make_scorer(), make_scorer()
     batch = tiles(4)
-    for t in (0.0, 1.0, 2.0):
-        scores = first.score_frame(batch, timestamp=t)
-        expected = second.terms(second.embed(batch), timestamp=t).scores
+    for _ in range(3):
+        scores = first.score_frame(batch)
+        expected = second.terms(second.embed(batch)).scores
         assert scores == pytest.approx(expected.tolist())
 
 
@@ -237,15 +251,16 @@ def test_bad_tiles_and_configs_are_rejected() -> None:
     with pytest.raises(ValueError):
         make_scorer().score_tiles([np.zeros((32, 16, 3), dtype=np.uint8)])
     with pytest.raises(ValueError):
-        make_scorer().terms(np.ones((2, 5), dtype=np.float32), timestamp=0.0)
+        make_scorer().terms(np.ones((2, 5), dtype=np.float32))
     with pytest.raises(ValueError):
         ClipConfig(targets=())
     with pytest.raises(ValueError):
         ClipConfig(template="no placeholder")
     with pytest.raises(ValueError):
         ClipConfig(null_prompt="  ")
-    with pytest.raises(ValueError):
-        ClipConfig(window=0.0)
+    for frames in (0, -3, 10.0, True):
+        with pytest.raises(ValueError):
+            ClipConfig(window_frames=frames)  # type: ignore[arg-type]
     with pytest.raises(ValueError):
         make_scorer(min_history=65)
     with pytest.raises(ValueError):
@@ -257,8 +272,8 @@ def test_kept_tiles_rescore_frames_under_the_same_and_a_new_query() -> None:
     kept, firsts = [], []
     for i in range(4):
         frame = tiles(3, seed=10 + i)
-        scores, state = scorer.score_and_keep(frame, timestamp=float(i))
-        assert scores == twin.score_frame(frame, timestamp=float(i))  # same scoring, same memory
+        scores, state = scorer.score_and_keep(frame)
+        assert scores == twin.score_frame(frame)  # same scoring, same memory
         assert state.embeddings.dtype == np.float16 and state.embeddings.shape == (3, 16)
         kept.append(state)
         firsts.append(max(scores))
@@ -282,7 +297,8 @@ def test_bundle_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert settings["model"] == "clip"
     assert settings["clip"]["model"] == "tiny-test-clip"
     assert settings["clip"]["targets"] == ["a person", "a boat"]
-    assert settings["clip"]["window"] == 5.0
+    assert settings["clip"]["window_frames"] == 5
+    assert "window" not in settings["clip"]
     assert settings["reference_file"] == CLIP_REFERENCE_FILE
     assert (settings["tile_size"], settings["reference"], settings["half"]) == (224, 0.3, False)
     assert "detection" not in settings
@@ -301,6 +317,16 @@ def test_bundle_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
     save_clip_bundle(tmp_path, scorer, PriorityScale(reference=0.3), tile_size=224, detection=0.8)
     assert load_bundle(tmp_path).detection == 0.8
+
+
+def test_bundles_with_a_window_in_seconds_are_refused(tmp_path: Path) -> None:
+    save_clip_bundle(tmp_path, make_scorer(), PriorityScale(reference=0.3), tile_size=224)
+    settings = json.loads((tmp_path / SETTINGS_FILE).read_text())
+    del settings["clip"]["window_frames"]
+    settings["clip"]["window"] = 10.0  # as bundles were written before the window counted frames
+    (tmp_path / SETTINGS_FILE).write_text(json.dumps(settings))
+    with pytest.raises(ValueError, match="10 seconds.*calibrate_clip"):
+        load_bundle(tmp_path)
 
 
 def test_old_reject_phrase_bundles_are_refused(tmp_path: Path) -> None:

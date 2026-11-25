@@ -13,8 +13,8 @@ CLIP image embedding per tile:
   what every tile shares with any aerial caption, which plain cosine cannot
   rank past. There are no reject phrases: nothing about the scenery is
   written by hand.
-- Novelty: (1 - the tile's highest cosine to a tile of an earlier frame in
-  the last ``window`` seconds) / 2 (``model.novelty``), so a target that
+- Novelty: (1 - the tile's highest cosine to a tile of one of the last
+  ``window_frames`` frames) / 2 (``model.novelty``), so a target that
   stays in view fades while one that has just appeared stands out.
 
 The experiments combined the two terms by averaging their ranks over the
@@ -29,8 +29,9 @@ instead, and a tile scores the mean of its two percentiles:
   stays smooth past the reference's largest score.
 - Novelty becomes its percentile among the novelty of the flight's earlier
   tiles (``model.novelty.NoveltyScale``), which adapts to frame rate and
-  terrain. It is neutral, 0.5, when no earlier frame is in the window or
-  fewer than ``NOVELTY_MIN_HISTORY`` tiles have been seen.
+  terrain. It is neutral, 0.5, for a flight's first frame, which has no
+  earlier frame to compare with, and until ``NOVELTY_MIN_HISTORY`` tiles
+  have been seen.
 
 Percentiles, not z-scores, keep one term's heavy tail from drowning the
 other: on open water novelty's z-scores run past 50 while the query's stop
@@ -40,12 +41,13 @@ positive, strictly increasing in both terms and unbounded, so
 ``tagging.priority`` never ties strong detections. Its order is that of the
 mean percentile.
 
-``score_tiles`` has no timestamps, so novelty is neutral there; calibration
-uses it. ``score_frame`` takes each frame's capture time and keeps the
-window, so frames must come in capture order. ``terms`` returns what a
-backlog can keep per tile, the embedding and novelty percentile, and
-``retarget`` rescores those against a new query with one matrix product,
-without the images. Models load through Hugging Face ``transformers``
+``score_tiles`` remembers nothing, so novelty is neutral there; calibration
+uses it. ``score_frame`` scores a frame against the window and then adds
+it, so frames must come in capture order, and ``reset`` starts a new
+flight. ``terms`` returns what a backlog can keep per tile, the embedding
+and novelty percentile, and ``retarget`` rescores those against a new
+query with one matrix product, without the images. Models load through
+Hugging Face ``transformers``
 (``AutoModel``), so any CLIP-style checkpoint with ``get_text_features``
 and ``get_image_features`` works by name, and weights download on first
 use. torch and transformers are imported inside functions, so importing
@@ -94,6 +96,7 @@ DEFAULT_BACKGROUNDS = (
     "rocks",
 )
 NULL_PROMPT = "an aerial photo."
+WINDOW_FRAMES = 20  # tagged frames novelty looks back over; 10 s at two frames a second
 NOVELTY_HISTORY = 10_000  # earlier tiles of the flight sampled to place novelty
 NOVELTY_MIN_HISTORY = 200  # tiles seen before novelty counts
 MAD_TO_SIGMA = 1.4826  # median absolute deviation to standard deviation, for normal data
@@ -108,21 +111,21 @@ class ClipConfig:
 
     Each query phrase is placed into ``template`` before encoding. No query
     phrases, a template without ``{}``, a blank bare template, or a window
-    that is not positive and finite RAISE ValueError.
+    that is not a positive whole number of frames RAISE ValueError.
 
     Parameters:
         - model (str): Hugging Face model id of a CLIP-style checkpoint
         - targets (tuple[str, ...]): the query: phrases for what is worth sending
         - template (str): sentence each phrase is placed into
         - null_prompt (str): the template with no object, subtracted from each phrase
-        - window (float): seconds of earlier frames novelty is measured against
+        - window_frames (int): how many of the latest tagged frames novelty is measured against
     """
 
     model: str = DEFAULT_MODEL
     targets: tuple[str, ...] = DEFAULT_TARGETS
     template: str = "an aerial photo of {}."
     null_prompt: str = NULL_PROMPT
-    window: float = 10.0
+    window_frames: int = WINDOW_FRAMES
 
     def __post_init__(self) -> None:
         if not self.targets:
@@ -131,8 +134,9 @@ class ClipConfig:
             raise ValueError(f"template must contain '{{}}', got {self.template!r}")
         if not self.null_prompt.strip():
             raise ValueError("null_prompt must not be blank")
-        if not math.isfinite(self.window) or self.window <= 0:
-            raise ValueError(f"window must be positive and finite, got {self.window}")
+        frames = self.window_frames
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+            raise ValueError(f"window_frames must be a positive whole number, got {frames!r}")
 
 
 @dataclass(frozen=True)
@@ -398,9 +402,8 @@ class ClipScorer:
         model = model.to(self.device).eval()
         self._model = model.half() if half else model.float()
         self._null = self._encode([config.null_prompt])[0]
-        self._window = NoveltyWindow(config.window)
+        self._window = NoveltyWindow(config.window_frames)
         self._scale = scale
-        self._latest: float | None = None
         self._reference: np.ndarray | None = None
         self._query: QueryTerm | None = None
         if reference is not None:
@@ -553,31 +556,27 @@ class ClipScorer:
         query_z = self.query.z(self.embed(tiles))
         return combine(query_z, np.full_like(query_z, 0.5)).tolist()
 
-    def score_frame(self, tiles: Sequence[np.ndarray], timestamp: float) -> list[float]:
+    def score_frame(self, tiles: Sequence[np.ndarray]) -> list[float]:
         """
         Score one frame's tiles by query and novelty, then remember them.
 
         Parameters:
             - tiles (Sequence[np.ndarray]): uint8 RGB square tiles of one frame
-            - timestamp (float): the frame's capture time in seconds
 
         Return: one raw score per tile, in the order given
         """
-        return self.terms(self.embed(tiles), timestamp).scores.tolist()
+        return self.terms(self.embed(tiles)).scores.tolist()
 
-    def score_and_keep(
-        self, tiles: Sequence[np.ndarray], timestamp: float
-    ) -> tuple[list[float], KeptTiles]:
+    def score_and_keep(self, tiles: Sequence[np.ndarray]) -> tuple[list[float], KeptTiles]:
         """
         Score one frame's tiles as ``score_frame`` does, and return what rescoring it needs.
 
         Parameters:
             - tiles (Sequence[np.ndarray]): uint8 RGB square tiles of one frame
-            - timestamp (float): the frame's capture time in seconds
 
         Return: one raw score per tile in the order given, and the frame's kept tiles
         """
-        terms = self.terms(self.embed(tiles), timestamp)
+        terms = self.terms(self.embed(tiles))
         kept = KeptTiles(terms.embeddings.astype(np.float16), terms.novelty_p.astype(np.float32))
         return terms.scores.tolist(), kept
 
@@ -608,20 +607,19 @@ class ClipScorer:
         starts = np.cumsum([0, *counts[:-1]])
         return np.maximum.reduceat(scores, starts).tolist()
 
-    def terms(self, embeddings: np.ndarray, timestamp: float) -> TileTerms:
+    def terms(self, embeddings: np.ndarray) -> TileTerms:
         """
         Score one frame's already embedded tiles, then remember them.
 
         The core of ``score_frame``, for embeddings from elsewhere (a cache, a
         TensorRT engine). Novelty is measured before this frame joins the
-        window, and placed among the novelty of tiles seen before it. A
-        timestamp earlier than the last one starts afresh, as ``reset``
-        does. Embeddings whose width differs from the reference's RAISE
+        window, and placed among the novelty of tiles seen before it. Each
+        call is the next frame of the flight; call ``reset`` between
+        flights. Embeddings whose width differs from the reference's RAISE
         ValueError.
 
         Parameters:
             - embeddings (np.ndarray): (tiles, dim) unit tile embeddings of one frame
-            - timestamp (float): the frame's capture time in seconds
 
         Return: the frame's per-tile embeddings, query z-scores, novelty percentiles, raw scores
         """
@@ -632,10 +630,7 @@ class ClipScorer:
                 f"embeddings must be (tiles, {query.directions.shape[1]}), "
                 f"got shape {embeddings.shape}"
             )
-        if self._latest is not None and timestamp < self._latest:
-            self.reset()
-        novelty = self._window.observe(embeddings, timestamp)
-        self._latest = timestamp
+        novelty = self._window.observe(embeddings)
         novelty_p = self._scale.percentile(novelty)
         self._scale.add(novelty)
         query_z = query.z(embeddings)
@@ -649,7 +644,6 @@ class ClipScorer:
         """
         self._window.reset()
         self._scale.reset()
-        self._latest = None
 
     def _set_reference(self, reference: np.ndarray) -> None:
         """

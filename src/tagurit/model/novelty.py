@@ -1,13 +1,19 @@
 """
-Novelty against what the scout has just seen: a time window of recent tile embeddings.
+Novelty against what the scout has just seen: a window of the tiles of its last few frames.
 
-A tile is novel when nothing in the last few seconds looked like it. Its
-novelty is (1 - its highest cosine to a tile of an earlier frame in the
-window) / 2, so it lies in [0, 1] for unit embeddings. Only frames strictly
-earlier in time count: other tiles of the same frame, and frames stamped
-with the same time, never do. A target that stays in view stops being novel
-once its earlier sightings are in the window, while one that has just come
-into view is.
+A tile is novel when nothing in the frames just before it looked like it.
+Its novelty is (1 - its highest cosine to a tile of an earlier frame in the
+window) / 2, so it lies in [0, 1] for unit embeddings. Only earlier frames
+count, never other tiles of the same frame. A target that stays in view
+stops being novel once its earlier sightings are in the window, while one
+that has just come into view is.
+
+The window is counted in tagged frames, not seconds. A window of seconds
+is empty whenever frames are tagged further apart than it is long, and
+grows with the frame rate; a window of frames costs the same memory and
+the same search at any rate, always holds something after the first
+frame, and gives the same novelty however fast a recorded flight is
+replayed.
 
 How novel is unusually novel depends on frame rate and terrain, so
 ``NoveltyScale`` turns novelty into a percentile against a uniform sample of
@@ -25,23 +31,25 @@ import numpy as np
 
 class NoveltyWindow:
     """
-    Remembers the tile embeddings of the last ``seconds`` and scores new frames against them.
+    Remembers the tile embeddings of the last ``frames`` frames and scores new frames against them.
 
-    Frames must arrive in time order. A timestamp earlier than the latest
-    one starts a new window, as when a new flight's clock restarts. With
-    no earlier frame in the window, novelty is NaN, which callers treat as
-    neutral. Not thread-safe; drive one instance from one thread. A window
-    that is not positive and finite RAISES ValueError.
+    One ``observe`` call is one frame: every tile of one tagged image.
+    Frames must arrive in capture order. Once ``frames`` of them are held,
+    each new one replaces the oldest. With no earlier frame held, as for
+    the first frame of a flight, novelty is NaN, which callers treat as
+    neutral. Nothing here knows when a flight ends: call ``reset`` to start
+    a new one. Not thread-safe; drive one instance from one thread. A
+    window that is not a positive integer RAISES ValueError.
 
     Parameters:
-        - seconds (float): how far back a frame still counts as just seen
+        - frames (int): how many of the latest frames still count as just seen
     """
 
-    def __init__(self, seconds: float) -> None:
-        if not math.isfinite(seconds) or seconds <= 0:
-            raise ValueError(f"window must be positive and finite, got {seconds}")
-        self.seconds = seconds
-        self._frames: deque[tuple[float, np.ndarray]] = deque()
+    def __init__(self, frames: int) -> None:
+        if isinstance(frames, bool) or not isinstance(frames, int) or frames <= 0:
+            raise ValueError(f"window must be a positive whole number of frames, got {frames!r}")
+        self.frames = frames
+        self._frames: deque[np.ndarray] = deque(maxlen=frames)
 
     def reset(self) -> None:
         """
@@ -51,40 +59,35 @@ class NoveltyWindow:
         """
         self._frames.clear()
 
-    def observe(self, embeddings: np.ndarray, timestamp: float) -> np.ndarray:
+    def observe(self, embeddings: np.ndarray) -> np.ndarray:
         """
         Score one frame's tiles against the window, then remember them.
 
-        A non-finite timestamp, embeddings that are not a 2-D array, or a
-        width that differs from the remembered tiles' RAISES ValueError.
+        MUTATES the window: the frame joins it and, when the window is
+        full, the oldest frame leaves. Embeddings that are not a 2-D array,
+        or a width that differs from the remembered tiles', RAISE
+        ValueError.
 
         Parameters:
             - embeddings (np.ndarray): (tiles, dim) unit tile embeddings of one frame
-            - timestamp (float): the frame's capture time in seconds
 
-        Return: (tiles,) novelty in [0, 1], NaN where no earlier frame is in the window
+        Return: (tiles,) novelty in [0, 1], NaN when the window holds no earlier frame
         """
-        if not math.isfinite(timestamp):
-            raise ValueError(f"timestamp must be finite, got {timestamp}")
         embeddings = np.asarray(embeddings, dtype=np.float32)
         if embeddings.ndim != 2:
             raise ValueError(f"embeddings must be (tiles, dim), got shape {embeddings.shape}")
-        if self._frames and embeddings.shape[1] != self._frames[-1][1].shape[1]:
+        if self._frames and embeddings.shape[1] != self._frames[-1].shape[1]:
             raise ValueError(
                 f"embeddings have width {embeddings.shape[1]}, "
-                f"the window holds {self._frames[-1][1].shape[1]}"
+                f"the window holds {self._frames[-1].shape[1]}"
             )
-        if self._frames and timestamp < self._frames[-1][0]:
-            self.reset()
-        while self._frames and self._frames[0][0] < timestamp - self.seconds:
-            self._frames.popleft()
-        earlier = [tiles for seen, tiles in self._frames if seen < timestamp]
+        earlier = [tiles for tiles in self._frames if len(tiles)]
         if earlier and len(embeddings):
             nearest = (embeddings @ np.concatenate(earlier).T).max(axis=1)
             novelty = (1.0 - nearest) / 2.0
         else:
             novelty = np.full(len(embeddings), np.nan, dtype=np.float32)
-        self._frames.append((timestamp, embeddings))
+        self._frames.append(embeddings)
         return novelty
 
 

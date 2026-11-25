@@ -5,9 +5,9 @@ This is the call the orchestrator makes for each captured frame before it
 builds an ``ImageFrame`` for the client. A frame's raw score is its most
 unusual tile, because one swimmer in one tile is the whole reason to keep
 the frame. The tagger works with any ``model.scorer.TileScorer`` and never
-learns which model is behind it. A ``model.scorer.WindowedTileScorer`` also
-gets each frame's capture time, since its scores depend on the frames just
-before; such a tagger must be fed frames in capture order. With a
+learns which model is behind it. A ``model.scorer.WindowedTileScorer``
+scores each frame against the frames just before it; such a tagger must be
+fed frames in capture order, and ``reset`` between flights. With a
 ``model.scorer.RetargetableTileScorer`` each tagged frame also carries what
 the scorer kept of it, so ``set_targets`` can change the query mid-mission
 and ``rescore`` can give frames still waiting in the client a priority
@@ -53,9 +53,9 @@ class Tagger:
     """
     Score frames by their most unusual tile and map that onto a priority.
 
-    Holds no per-frame state itself. With a ``WindowedTileScorer`` and a
-    timestamp, a frame's scores depend on the frames scored before it;
-    without a timestamp, or with a plain ``TileScorer``, calls are
+    Holds no per-frame state itself. With a ``WindowedTileScorer`` and
+    ``remember``, a frame's scores depend on the frames scored before it;
+    without ``remember``, or with a plain ``TileScorer``, calls are
     independent. A non-positive tile size, or a detection threshold outside
     [0, 1], RAISES ValueError.
 
@@ -83,18 +83,19 @@ class Tagger:
         self.tile_size = tile_size
         self.detection = detection
 
-    def score(self, image_bytes: bytes, timestamp: float | None = None) -> FrameScore:
+    def score(self, image_bytes: bytes, remember: bool = False) -> FrameScore:
         """
         Score one encoded frame.
 
-        With a timestamp, a ``WindowedTileScorer`` scores the frame against
-        the frames before it and remembers it; otherwise tiles are scored on
-        their own. Undecodable bytes, or a frame smaller than one tile,
+        With ``remember``, a ``WindowedTileScorer`` scores the frame against
+        the frames before it and remembers it as the next frame of the
+        flight; otherwise tiles are scored on their own and nothing is
+        remembered. Undecodable bytes, or a frame smaller than one tile,
         RAISE ValueError.
 
         Parameters:
             - image_bytes (bytes): encoded image, e.g. JPEG
-            - timestamp (float | None): capture time in seconds; None scores the frame alone
+            - remember (bool): score the frame as the next one of the flight, in capture order
 
         Return: the frame's priority, raw score, and per-tile scores
         """
@@ -103,11 +104,11 @@ class Tagger:
         tiles = tile_grid(width, height, self.tile_size)
         crops = crop_tiles(image, tiles)
         kept = None
-        if timestamp is not None and isinstance(self.scorer, RetargetableTileScorer):
-            scores, kept = self.scorer.score_and_keep(crops, timestamp)
+        if remember and isinstance(self.scorer, RetargetableTileScorer):
+            scores, kept = self.scorer.score_and_keep(crops)
             tile_scores = tuple(scores)
-        elif timestamp is not None and isinstance(self.scorer, WindowedTileScorer):
-            tile_scores = tuple(self.scorer.score_frame(crops, timestamp))
+        elif remember and isinstance(self.scorer, WindowedTileScorer):
+            tile_scores = tuple(self.scorer.score_frame(crops))
         else:
             tile_scores = tuple(self.scorer.score_tiles(crops))
         if len(tile_scores) != len(tiles):
@@ -125,7 +126,9 @@ class Tagger:
         """
         Score one encoded frame and package it for the client.
 
-        The image bytes pass through unchanged.
+        The frame is scored as the next one of the flight, so calls must
+        come in capture order. The image bytes pass through unchanged, and
+        the timestamp is only carried along: scoring does not read it.
 
         Parameters:
             - frame_id (int): unique image number within the session
@@ -134,7 +137,7 @@ class Tagger:
 
         Return: an ImageFrame carrying the frame's priority and what the scorer kept of it
         """
-        score = self.score(image_bytes, timestamp)
+        score = self.score(image_bytes, remember=True)
         return ImageFrame(
             frame_id=frame_id,
             timestamp=timestamp,

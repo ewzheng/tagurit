@@ -33,15 +33,15 @@ class WrongCount:
 
 
 class Windowed(MeanBrightness):
-    """Remembers the timestamps it was given, as a scorer with a novelty window would."""
+    """Counts the frames it was asked to remember, as a scorer with a novelty window would."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.timestamps: list[float] = []
+        self.frames = 0
         self.resets = 0
 
-    def score_frame(self, tiles: Sequence[np.ndarray], timestamp: float) -> list[float]:
-        self.timestamps.append(timestamp)
+    def score_frame(self, tiles: Sequence[np.ndarray]) -> list[float]:
+        self.frames += 1
         return [float(tile.mean()) + 1.0 for tile in tiles]
 
     def reset(self) -> None:
@@ -90,21 +90,22 @@ def test_tag_builds_an_image_frame_with_the_original_bytes() -> None:
     assert 0.0 <= frame.priority < 1.0
 
 
-def test_windowed_scorer_gets_timestamps_and_plain_scorer_does_not() -> None:
+def test_windowed_scorer_remembers_only_when_asked_and_plain_scorer_never() -> None:
     windowed = Windowed()
     tagger = Tagger(windowed, PriorityScale(reference=10.0), tile_size=32)
-    tagger.tag(frame_id=1, timestamp=5.0, image_bytes=frame_with_bright_corner())
+    tagged = tagger.tag(frame_id=1, timestamp=5.0, image_bytes=frame_with_bright_corner())
+    assert tagged.timestamp == 5.0  # carried along, not read by scoring
     alone = tagger.score(frame_with_bright_corner())
-    with_time = tagger.score(frame_with_bright_corner(), timestamp=6.0)
-    assert windowed.timestamps == [5.0, 6.0]
-    assert windowed.calls == 1  # the call without a timestamp scored tiles alone
-    assert with_time.raw_score == pytest.approx(alone.raw_score + 1.0)
+    remembered = tagger.score(frame_with_bright_corner(), remember=True)
+    assert windowed.frames == 2  # the tagged frame and the remembered one
+    assert windowed.calls == 1  # the call without remember scored tiles alone
+    assert remembered.raw_score == pytest.approx(alone.raw_score + 1.0)
     tagger.reset()
     assert windowed.resets == 1
 
     plain = MeanBrightness()
     plain_tagger = Tagger(plain, PriorityScale(reference=10.0), tile_size=32)
-    plain_tagger.score(frame_with_bright_corner(), timestamp=1.0)
+    plain_tagger.score(frame_with_bright_corner(), remember=True)
     plain_tagger.reset()  # nothing to forget
     assert plain.calls == 1
 
@@ -116,10 +117,8 @@ class Retargetable(Windowed):
         super().__init__()
         self.gain = 1.0
 
-    def score_and_keep(
-        self, tiles: Sequence[np.ndarray], timestamp: float
-    ) -> tuple[list[float], object]:
-        scores = [self.gain * s for s in self.score_frame(tiles, timestamp)]
+    def score_and_keep(self, tiles: Sequence[np.ndarray]) -> tuple[list[float], object]:
+        scores = [self.gain * s for s in self.score_frame(tiles)]
         return scores, max(scores) / self.gain
 
     def set_targets(self, phrases: Sequence[str]) -> None:
