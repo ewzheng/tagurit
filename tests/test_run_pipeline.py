@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -91,7 +92,7 @@ def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.M
     cancelled = []
 
     async def endless_pipeline(
-        images: object, tagger: object, report: object, **_kwargs: object
+        images: object, tagger: object, report: object, send_interval: float, **options: object
     ) -> None:
         try:
             await asyncio.Event().wait()
@@ -106,7 +107,7 @@ def test_a_failing_dashboard_stops_the_pipeline_and_raises(monkeypatch: pytest.M
     monkeypatch.setattr(run_pipeline.orchestrator, "run", endless_pipeline)
     recorder = run_pipeline.Recorder(object(), targets={})  # type: ignore[arg-type]
     with pytest.raises(RuntimeError, match="no display"):
-        asyncio.run(run_pipeline.run_demo([], 0.0, recorder, {}, False, BrokenVideo()))  # type: ignore[arg-type]
+        asyncio.run(run_pipeline.run_demo([], 0.0, 0.0, recorder, {}, False, BrokenVideo()))  # type: ignore[arg-type]
     assert cancelled == [True]
 
 
@@ -121,7 +122,9 @@ def test_cli_passes_adaptive_mode_and_event_log(tmp_path, monkeypatch) -> None:
         kwargs["event_log"].record("window_change", "test", window_size=4)
         return np.zeros((1, 1, 3), dtype=np.uint8)
 
-    monkeypatch.setattr(run_pipeline, "load_bundle", lambda *_args, **_kwargs: object())
+    # A bundle without a detection threshold, so the bank sends by priority.
+    tagger = SimpleNamespace(detection=None)
+    monkeypatch.setattr(run_pipeline, "load_bundle", lambda *_args, **_kwargs: tagger)
     monkeypatch.setattr(run_pipeline, "run_demo", fake_run_demo)
     run_pipeline.main(
         [

@@ -22,6 +22,8 @@ DATASETS: dict[str, ModuleType] = {
     "seadronessee": seadronessee,
     "sparse-visdrone": framelist,
     "sparse-seadronessee": framelist,
+    "sparse-visdrone-car": framelist,
+    "sparse-visdrone-person": framelist,
 }
 
 DATA_DIR = Path("data")

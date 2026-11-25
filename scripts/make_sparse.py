@@ -4,12 +4,17 @@ Build a synthetic sparse stream by cropping windows out of an annotated dataset.
 Usage:
     uv run python scripts/make_sparse.py seadronessee
     uv run python scripts/make_sparse.py visdrone --size 512x512
+    uv run python scripts/make_sparse.py visdrone --size 512x512 --crops-per-frame 8 --classes car
 
 For every source frame, in order, ``--crops-per-frame`` windows of
 ``--size`` are planned. Each is a target window with probability
 ``--rate``, holding one whole target (``tagurit.sim.sparse.target_window``),
-and otherwise an empty window that no box of any class comes within
-``--margin`` pixels of. When the chosen kind does not fit in a frame, that
+and otherwise an empty window that no target box or ignored region comes
+within ``--margin`` pixels of. Targets are boxes of ``--classes``, or every
+labelled box by default. Clearing every object pulls empty crops away from
+wherever objects gather, off the streets in a city, so a scorer can separate
+the crops by scenery; with ``--classes car``, empty crops may still show
+people on a street. When the chosen kind does not fit in a frame, that
 crop is skipped and counted. Crowded frames rarely fit an empty window, so
 before anything is written, target crops are thinned at random until each
 sequence's target share is at most ``--rate``. Without that, a crowded
@@ -24,11 +29,14 @@ crops.
 Every frame of a source sequence must share the first frame's size; a
 frame that does not RAISES SystemExit.
 
-Output goes to ``data/sparse-<source>/<sequence>/`` in the
+Output goes to ``data/sparse-<source>/<sequence>/``, or
+``data/sparse-<source>-<classes>/`` with ``--classes``, in the
 ``tagurit.sim.framelist`` format, crops re-encoded as JPEG, with
-``make_sparse.json`` at the top recording the settings and counts. Slashes
-in source sequence names become dashes. An existing output folder RAISES
-SystemExit unless ``--force`` deletes it first.
+``make_sparse.json`` at the top recording the settings and counts. The
+output name must be a dataset in ``tagurit.sim.dataloader.DATASETS``, and
+every class must label some box of the source, or it RAISES SystemExit.
+Slashes in source sequence names become dashes. An existing output folder
+RAISES SystemExit unless ``--force`` deletes it first.
 """
 
 from __future__ import annotations
@@ -102,7 +110,7 @@ def plan(trace: Trace, args: argparse.Namespace, rng: random.Random) -> tuple[li
 
     Parameters:
         - trace (Trace): the source sequence, all frames the same size
-        - args (argparse.Namespace): crop size, rate, crops per frame, margin
+        - args (argparse.Namespace): crop size, rate, crops per frame, margin, target classes
         - rng (random.Random): source of every random choice
 
     Return: kept crops in source order, and counts of kept, skipped and dropped crops
@@ -119,10 +127,19 @@ def plan(trace: Trace, args: argparse.Namespace, rng: random.Random) -> tuple[li
         for slot in range(args.crops_per_frame):
             wants_target = rng.random() < args.rate
             if wants_target:
-                window = target_window(frame.boxes, frame_width, frame_height, width, height, rng)
+                window = target_window(
+                    frame.boxes, frame_width, frame_height, width, height, rng, classes=args.classes
+                )
             else:
                 window = empty_window(
-                    frame.boxes, frame_width, frame_height, width, height, args.margin, rng
+                    frame.boxes,
+                    frame_width,
+                    frame_height,
+                    width,
+                    height,
+                    args.margin,
+                    rng,
+                    classes=args.classes,
                 )
             if window is None:
                 counts["skipped target" if wants_target else "skipped empty"] += 1
@@ -220,6 +237,9 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--rate", type=float, default=0.01, help="share of target crops asked for")
     parser.add_argument("--crops-per-frame", type=int, default=4)
     parser.add_argument("--margin", type=int, default=32, help="clearance around boxes, pixels")
+    parser.add_argument(
+        "--classes", nargs="+", help="labels that count as targets, e.g. car; default every label"
+    )
     parser.add_argument("--quality", type=int, default=90, help="JPEG quality of the crops")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--force", action="store_true", help="delete an existing output first")
@@ -229,19 +249,29 @@ def main(argv: list[str] | None = None) -> None:
     if args.crops_per_frame <= 0:
         parser.error("--crops-per-frame must be positive")
 
-    out = dataloader.data_root(f"sparse-{args.source}")
-    if out.exists():
-        if not args.force:
-            raise SystemExit(f"{out} exists; pass --force to replace it")
-        shutil.rmtree(out)
+    dataset = f"sparse-{args.source}"
+    if args.classes:
+        args.classes = sorted(set(args.classes))
+        dataset += "-" + "-".join(args.classes)
+    if dataset not in dataloader.DATASETS:
+        raise SystemExit(f"{dataset} is not in tagurit.sim.dataloader.DATASETS; add it there")
+    out = dataloader.data_root(dataset)
+    if out.exists() and not args.force:
+        raise SystemExit(f"{out} exists; pass --force to replace it")
     names = dataloader.sequences(args.source)
     if not names:
         raise SystemExit(f"no {args.source} sequences on disk; run scripts/fetch_data.py first")
+    traces = {name: dataloader.load(args.source, name) for name in args.sequences or names}
+    labels = {box.label for trace in traces.values() for frame in trace for box in frame.boxes}
+    missing = sorted(set(args.classes or ()) - labels)
+    if missing:
+        raise SystemExit(f"no box is labelled {missing}; the source has {sorted(labels)}")
+    if out.exists():
+        shutil.rmtree(out)
 
     rng = random.Random(args.seed)
     totals: Counter[str] = Counter()
-    for name in args.sequences or names:
-        trace = dataloader.load(args.source, name)
+    for name, trace in traces.items():
         crops, counts = plan(trace, args, rng)
         folder = out / name.replace("/", "-")
         write_crops(crops, folder, args.quality)
@@ -263,6 +293,7 @@ def main(argv: list[str] | None = None) -> None:
         "rate": args.rate,
         "crops_per_frame": args.crops_per_frame,
         "margin": args.margin,
+        "classes": args.classes,
         "quality": args.quality,
         "seed": args.seed,
         "sequences": args.sequences or names,

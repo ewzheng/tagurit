@@ -7,6 +7,9 @@ backlog drains alongside the live stream.
 
 `architecture.md` in this directory has the current module map, dataflow,
 state machine and stack. Read it before touching `src/`.
+`experiments.md` in this directory records the model experiments so far, their
+results, the Jetson setup and the open next steps. Read it before working on
+`model/`, `tagging/` or the experiment scripts.
 The checkpoint 1 deck in `docs/materials/` provides the original project design.
 
 ## Goals
@@ -47,7 +50,8 @@ Fallback tiers, in order. Finish one before starting the next.
 - `docs/specs/` — design docs, named `YYYY-MM-DD-<topic>-design.md`
 - `docs/plans/` — implementation plans
 - `docs/materials/` — course deliverables, including checkpoint decks
-- `scripts/` — dev helpers, trace tools and network emulation
+- `scripts/` — dev helpers, trace tools, network emulation, model experiments
+  (`experiment_*.py`) and Jetson-side scripts (`jetson/`)
 - `data/` — gitignored local traces, sample images and manifests
 - `native/` — planned C implementations for selected systems components
 
@@ -66,10 +70,13 @@ Fallback tiers, in order. Finish one before starting the next.
 - `uv run python scripts/fetch_data.py seadronessee` — fetch a dataset into `data/`
 - `uv run python scripts/make_sparse.py seadronessee` — build a synthetic sparse
   stream of crops in `data/sparse-seadronessee`, about 1% holding a target
+- `uv run python scripts/make_sparse.py visdrone --size 512x512 --crops-per-frame 8 --classes car`
+  — the same for one class: empty crops avoid only cars, in `data/sparse-visdrone-car`
 - `uv run python scripts/fit_patchcore.py seadronessee --out data/models/seadronessee`
   — fit a PatchCore tagger bundle on target-free tiles
-- `uv run python scripts/calibrate_clip.py sparse-seadronessee --out data/models/clip-sds`
-  — set up a zero-shot CLIP tagger bundle, calibrated on target-free tiles
+- `uv run python scripts/calibrate_clip.py sparse-seadronessee --out data/models/clip-sds-224`
+  — set up a query-only CLIP tagger bundle with window novelty, scaled on target-free tiles,
+  with a detection threshold for the bank's send order
 - `uv run python scripts/score_trace.py data/models/seadronessee --manifest data/demo/manifest.csv`
   — score held-out frames, print ranking metrics, write a demo manifest
 - `uv run python3 -m tagurit.sim.run_pipeline data/models/sparse-seadronessee --empty-stride 5`

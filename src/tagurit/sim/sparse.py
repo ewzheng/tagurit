@@ -8,6 +8,12 @@ pixels. Pasting targets into empty frames is avoided on purpose: the seams
 would be easy anomalies and flatter any detector. This module only picks
 windows and moves boxes into window coordinates; ``scripts/make_sparse.py``
 does the file work.
+
+What counts as a target is the caller's choice: every labelled object by
+default, or only the classes a mission looks for. Empty windows that must
+clear every object sit away from wherever objects gather, so a scorer can
+tell them apart by scenery alone; empty of cars, a window may still show a
+street full of people.
 """
 
 from __future__ import annotations
@@ -45,14 +51,15 @@ def target_window(
     height: int,
     rng: random.Random,
     dont_care: Collection[str] = ("ignored",),
+    classes: Collection[str] | None = None,
 ) -> Window | None:
     """
     A window inside the frame that wholly contains one randomly chosen target.
 
-    The target is drawn from boxes that are not don't-care, lie inside the
-    frame, and fit in the window. The window is placed uniformly among the
-    positions that keep the target inside, so targets do not always sit in
-    the centre.
+    The target is drawn from boxes that are not don't-care, are of one of
+    ``classes``, lie inside the frame, and fit in the window. The window is
+    placed uniformly among the positions that keep the target inside, so
+    targets do not always sit in the centre.
 
     Parameters:
         - boxes (Sequence[Box]): ground truth on the frame
@@ -62,6 +69,7 @@ def target_window(
         - height (int): window height, pixels
         - rng (random.Random): source of the random choices
         - dont_care (Collection[str]): labels that are never targets
+        - classes (Collection[str] | None): labels that count as targets; None means all
 
     Return: the window, or None when no target fits
     """
@@ -71,6 +79,7 @@ def target_window(
         box
         for box in boxes
         if box.label not in dont_care
+        and (classes is None or box.label in classes)
         and box.width <= width
         and box.height <= height
         and box.left >= 0
@@ -95,10 +104,14 @@ def empty_window(
     margin: int,
     rng: random.Random,
     attempts: int = 50,
+    classes: Collection[str] | None = None,
+    dont_care: Collection[str] = ("ignored",),
 ) -> Window | None:
     """
-    A window inside the frame that no box, of any class, comes within ``margin`` of.
+    A window inside the frame that no target or don't-care box comes within ``margin`` of.
 
+    With ``classes`` None every box is a target, so the window holds no
+    object at all. Otherwise boxes of other labels may lie in the window.
     Tries uniformly random positions and gives up after ``attempts``, so a
     crowded frame may yield None even when a narrow gap exists.
 
@@ -108,14 +121,19 @@ def empty_window(
         - frame_height (int): frame height, pixels
         - width (int): window width, pixels
         - height (int): window height, pixels
-        - margin (int): clearance kept around every box, pixels
+        - margin (int): clearance kept around every box the window must avoid, pixels
         - rng (random.Random): source of the random positions
         - attempts (int): positions to try before giving up
+        - classes (Collection[str] | None): labels that count as targets; None means all
+        - dont_care (Collection[str]): labels avoided whatever ``classes`` is
 
     Return: the window, or None when none was found
     """
     if width > frame_width or height > frame_height:
         return None
+    avoided = [
+        box for box in boxes if classes is None or box.label in classes or box.label in dont_care
+    ]
     for _ in range(attempts):
         window = Window(
             left=rng.randint(0, frame_width - width),
@@ -123,7 +141,7 @@ def empty_window(
             width=width,
             height=height,
         )
-        if not any(_intersects(window, box, margin) for box in boxes):
+        if not any(_intersects(window, box, margin) for box in avoided):
             return window
     return None
 

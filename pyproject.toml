@@ -24,6 +24,7 @@ model = [
     "anomalib>=2.6.2",
     # The Jetson's torch links cuDSS but does not ship it; `make sync-jetson` links it in.
     "nvidia-cudss-cu12==0.8.0.10; sys_platform == 'linux' and platform_machine == 'aarch64' and python_version < '3.11'",
+    "sentencepiece>=0.2.2",
     "torch>=2.8",
     "torchvision>=0.23",
     "transformers>=5.18.0",
@@ -52,6 +53,9 @@ src = ["src", "tests"]
 select = ["E", "F", "I", "UP", "B"]
 
 [tool.uv]
+# Drop anomalib's headless OpenCV: gabriel-client's opencv-python covers it, and
+# both builds share one cv2 folder, so removing either deletes the other's files.
+override-dependencies = ["opencv-python-headless; sys_platform == 'never'"]
 # cuDSS only has to load for torch. Its cuda-toolkit dependency would install a
 # server cuBLAS that shadows JetPack's and fails on the Orin GPU.
 dependency-metadata = [{ name = "nvidia-cudss-cu12", version = "0.8.0.10", requires-dist = [] }]

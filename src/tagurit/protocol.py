@@ -3,7 +3,7 @@ Define the scored image frame shared by perception and client scheduling
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # Hold one scored image for handoff to the scheduler
@@ -20,12 +20,15 @@ class ImageFrame:
         - timestamp (float): Capture time in seconds since the Unix epoch
         - image_bytes (bytes): Encoded image contents
         - priority (float): Score between 0 and 1
+        - kept (object | None): What the tagger kept to score this frame again without its
+          image when the query changes or None; opaque to the client and never transmitted
     """
 
     frame_id: int       # Unique image number within the session
     timestamp: float    # Capture time in seconds since the Unix epoch
     image_bytes: bytes  # Encoded JPEG contents
     priority: float     # Required score between 0 and 1
+    kept: object | None = field(default=None, compare=False, repr=False)  # Tagger's rescoring state
 
     # Reject missing scores and values outside the allowed range
     def __post_init__(self) -> None:

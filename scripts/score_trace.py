@@ -12,7 +12,10 @@ bundle's ``fit.json``. ``--sequences`` scores other sequences instead,
 still from the same point in time onward. ``--dataset`` scores another
 dataset entirely, all of its sequences unless ``--sequences`` narrows
 them, held out at the same fraction: the frames that dataset's own bundle
-would be scored on, seen by a tagger fitted somewhere else.
+would be scored on, seen by a tagger fitted somewhere else. Frames are
+scored in capture order with their timestamps, each sequence starting
+afresh, so a tagger that remembers recent frames (CLIP's novelty window)
+sees them as the scout would; with ``--stride`` it sees every Nth only.
 
 Frame metrics come first: a frame is positive when it holds a target
 (``TraceFrame.has_target``), from a frame-level label or from its boxes.
@@ -239,10 +242,14 @@ def main(argv: list[str] | None = None) -> None:
     frame_scores: list[float] = []
     frame_labels: list[bool] = []
     millis_by_grid: dict[int, list[float]] = defaultdict(list)
+    previous: str | None = None
     for count, frame in enumerate(frames, start=1):
+        if frame.sequence != previous:
+            tagger.reset()  # each flight starts with nothing just seen
+            previous = frame.sequence
         image_bytes = frame.read()
         started = time.perf_counter()
-        result = tagger.score(image_bytes)
+        result = tagger.score(image_bytes, frame.timestamp)
         millis_by_grid[len(result.tiles)].append(1000 * (time.perf_counter() - started))
         tiles.extend(tile_labels(frame, result, record["margin"]))
         label = frame.has_target((DONT_CARE,))

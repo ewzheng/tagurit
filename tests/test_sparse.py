@@ -62,6 +62,27 @@ def test_empty_window_gives_up_on_a_full_frame() -> None:
     assert empty_window([box(0, 0, 1000, 500)], 1000, 500, 200, 100, 0, random.Random(0)) is None
 
 
+def test_target_window_draws_only_from_the_given_classes() -> None:
+    boxes = [box(100, 100, 20, 20), box(700, 300, 30, 20, "car")]
+    for seed in range(50):
+        window = target_window(boxes, 1000, 500, 200, 100, random.Random(seed), classes={"car"})
+        assert window is not None and inside(window, boxes[1])
+    assert target_window(boxes[:1], 1000, 500, 200, 100, random.Random(0), classes={"car"}) is None
+
+
+def test_empty_window_of_one_class_may_hold_other_classes_but_not_dont_care() -> None:
+    crowd = box(0, 0, 1000, 500)  # people everywhere
+    targets = [box(100, 100, 20, 20, "car"), box(600, 300, 50, 50, "ignored")]
+    rng = random.Random(0)
+    assert empty_window([crowd, *targets], 1000, 500, 200, 100, 30, rng) is None
+    for seed in range(50):
+        window = empty_window(
+            [crowd, *targets], 1000, 500, 200, 100, 30, random.Random(seed), classes={"car"}
+        )
+        assert window is not None
+        assert all(clear(window, b, 30) for b in targets)
+
+
 def test_boxes_are_clipped_and_moved_into_the_window() -> None:
     window = Window(left=100, top=50, width=200, height=100)
     moved = boxes_in_window(

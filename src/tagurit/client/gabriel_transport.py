@@ -108,6 +108,8 @@ class GabrielTransport:
         validate_identity(session_id, 1)
         if send_interval is None:
             send_interval = SEND_INTERVAL_SECONDS
+        if isinstance(send_interval, bool) or not isinstance(send_interval, (int, float)):
+            raise ValueError("Send interval must be a non-negative finite number")
         if not math.isfinite(send_interval) or send_interval < 0:
             raise ValueError("Send interval must be finite and nonnegative")
         self._send_interval = send_interval

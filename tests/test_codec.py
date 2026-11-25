@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import cv2
 import numpy as np
+import pytest
 from gabriel_protocol.v1 import gabriel_pb2
 
 from tagurit.client.frame_scheduler import FrameScheduler
@@ -66,3 +67,11 @@ def test_h264_odd_dimensions_and_retry() -> None:
     transport._receive_result(SimpleNamespace(string_result=retry_result.payload), 2)
     assert transport.completed == 1
     assert scheduler.pending_count() == 0
+
+
+@pytest.mark.parametrize("interval", [-1.0, float("nan"), float("inf"), True])
+def test_transport_rejects_an_invalid_send_interval(interval: float) -> None:
+    """A send interval must be a non-negative finite number."""
+    session = "00000000-0000-0000-0000-000000000001"
+    with pytest.raises(ValueError, match="Send interval"):
+        GabrielTransport(FrameScheduler(), session, lambda _e, _d: None, send_interval=interval)

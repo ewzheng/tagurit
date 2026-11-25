@@ -21,7 +21,7 @@ from tagurit.client.encoder_selection import select_encoder
 from tagurit.client.frame_scheduler import FrameScheduler
 from tagurit.client.gabriel_transport import GabrielTransport
 from tagurit.client.rolling_metrics import RollingSnapshot
-from tagurit.client.scheduler_datatypes import SchedulerState
+from tagurit.client.scheduler_datatypes import BankOrder, Rescorer, SchedulerState
 from tagurit.protocol import ImageFrame
 from tagurit.shared.telemetry import EventLog
 
@@ -39,6 +39,8 @@ async def run_client(
     event_log: EventLog | None = None,
     metrics_window_seconds: float = 10.0,
     metrics_report_interval_seconds: float = 2.0,
+    bank_order: BankOrder | None = None,
+    rescorers: AsyncIterable[Rescorer] | None = None,
 ) -> None:
     """
     Collect scored frames while Gabriel sends and reconnects as needed
@@ -60,6 +62,9 @@ async def run_client(
         - event_log (EventLog | None): Optional caller-owned CSV recorder
         - metrics_window_seconds (float): Recent receipt measurement horizon
         - metrics_report_interval_seconds (float): Time between console measurements
+        - bank_order (BankOrder | None): Chooses the next banked frame; None uses highest priority
+        - rescorers (AsyncIterable[Rescorer] | None): One rescorer per query change, applied
+          to waiting frames
 
     Return:
         void
@@ -71,7 +76,7 @@ async def run_client(
     # Create the scheduler and counters for this client run
     if window_size is None:
         window_size = INITIAL_WINDOW if adaptive_window else INFLIGHT_WINDOW
-    scheduler = FrameScheduler(window_size=window_size)
+    scheduler = FrameScheduler(window_size=window_size, bank_order=bank_order)
     selected_encoder = select_encoder(encoder, IMAGE_CODEC, VIDEO_CRF)
     controller = (
         AdaptiveWindowController(time.monotonic(), metrics_window_seconds, window_size)
@@ -151,6 +156,29 @@ async def run_client(
 
         report_event("DRAINED", "All supplied frames acknowledged")
 
+    # Rescore waiting frames each time the query changes
+    async def apply_rescorers() -> None:
+        async for rescorer in rescorers:
+            seen: set[int] = set()
+            changed = 0
+
+            # Frames scored under the old query may arrive while a pass is running
+            while True:
+                frames = [
+                    frame for frame in scheduler.waiting_frames() if frame.frame_id not in seen
+                ]
+
+                if not frames:
+                    break
+
+                seen.update(frame.frame_id for frame in frames)
+                changed += scheduler.reprioritize(await rescorer(frames))
+
+            report_event("RESCORE", f"{changed} waiting frames rescored for the new query")
+
+        # Query changes ending must not end the client
+        await asyncio.Event().wait()
+
     # Check the disconnected timer even while the image source is waiting
     async def maintain_queues() -> None:
         while True:
@@ -213,6 +241,9 @@ async def run_client(
         asyncio.create_task(maintain_queues()),
         asyncio.create_task(report_recent_metrics()),
     ]
+
+    if rescorers is not None:
+        tasks.append(asyncio.create_task(apply_rescorers()))
 
     try:
         # Finish when the source drains or surface an unexpected task failure
